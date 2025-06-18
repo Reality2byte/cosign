@@ -497,23 +497,6 @@ func signerFromKeyRef(ctx context.Context, certPath, certChainPath, keyRef strin
 	if _, err := cosign.TrustedCert(leafCert, rootPool, subPool); err != nil {
 		return nil, fmt.Errorf("unable to validate certificate chain: %w", err)
 	}
-	// Verify SCT if present in the leaf certificate.
-	contains, err := cosign.ContainsSCT(leafCert.Raw)
-	if err != nil {
-		return nil, err
-	}
-	if contains {
-		pubKeys, err := cosign.GetCTLogPubs(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("getting CTLog public keys: %w", err)
-		}
-		var chain []*x509.Certificate
-		chain = append(chain, leafCert)
-		chain = append(chain, certChain...)
-		if err := cosign.VerifyEmbeddedSCT(context.Background(), chain, pubKeys); err != nil {
-			return nil, err
-		}
-	}
 	certSigner.Chain = certChainBytes
 
 	return certSigner, nil
@@ -622,9 +605,6 @@ func fetchLocalSignedPayload(sig oci.Signature) (*cosign.LocalSignedPayload, err
 	}
 	if sigCert != nil {
 		signedPayload.Cert = base64.StdEncoding.EncodeToString(sigCert.Raw)
-		if err != nil {
-			return nil, err
-		}
 	} else {
 		signedPayload.Cert = ""
 	}
