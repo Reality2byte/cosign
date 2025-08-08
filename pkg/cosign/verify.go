@@ -247,7 +247,12 @@ func (co *CheckOpts) verificationOptions() (trustedMaterial root.TrustedMaterial
 	}
 
 	if !co.IgnoreTlog {
-		verifierOptions = append(verifierOptions, verify.WithTransparencyLog(1), verify.WithIntegratedTimestamps(1))
+		verifierOptions = append(verifierOptions, verify.WithTransparencyLog(1))
+		// If you aren't using a signed timestamp, use the time from the transparency log.
+		// For Rekor v2, a signed timestamp must be provided.
+		if !co.UseSignedTimestamps {
+			verifierOptions = append(verifierOptions, verify.WithIntegratedTimestamps(1))
+		}
 	}
 	if co.UseSignedTimestamps {
 		verifierOptions = append(verifierOptions, verify.WithSignedTimestamps(1))
