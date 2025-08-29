@@ -50,6 +50,10 @@ type AttestBlobOptions struct {
 	Fulcio      FulcioOptions
 	OIDC        OIDCOptions
 	SecurityKey SecurityKeyOptions
+
+	UseSigningConfig  bool
+	SigningConfigPath string
+	TrustedRootPath   string
 }
 
 var _ Interface = (*AttestOptions)(nil)
@@ -96,6 +100,16 @@ func (o *AttestBlobOptions) AddFlags(cmd *cobra.Command) {
 	// TODO: have this default to true as a breaking change
 	cmd.Flags().BoolVar(&o.NewBundleFormat, "new-bundle-format", false,
 		"output bundle in new format that contains all verification material")
+
+	// TODO: have this default to true as a breaking change
+	cmd.Flags().BoolVar(&o.UseSigningConfig, "use-signing-config", false,
+		"whether to use a TUF-provided signing config for the service URLs. Must provide --bundle, which will output verification material in the new format")
+
+	cmd.Flags().StringVar(&o.SigningConfigPath, "signing-config", "",
+		"path to a signing config file. Must provide --bundle, which will output verification material in the new format")
+
+	cmd.Flags().StringVar(&o.TrustedRootPath, "trusted-root", "",
+		"optional path to a TrustedRoot JSON file to verify a signature after signing")
 
 	cmd.Flags().StringVar(&o.Hash, "hash", "",
 		"hash of blob in hexadecimal (base16). Used if you want to sign an artifact stored elsewhere and have the hash")

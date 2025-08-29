@@ -16,6 +16,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/attest"
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/generate"
@@ -23,6 +24,7 @@ import (
 	"github.com/sigstore/cosign/v2/internal/ui"
 	"github.com/sigstore/cosign/v2/pkg/cosign"
 	"github.com/sigstore/cosign/v2/pkg/cosign/env"
+	"github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/spf13/cobra"
 )
 
@@ -88,12 +90,36 @@ func AttestBlob() *cobra.Command {
 				NewBundleFormat:          o.NewBundleFormat,
 			}
 			if o.Key == "" && env.Getenv(env.VariableSigstoreCTLogPublicKeyFile) == "" { // Get the trusted root if using fulcio for signing
-				trustedMaterial, err := cosign.TrustedRoot()
-				if err != nil {
-					ui.Warnf(context.Background(), "Could not fetch trusted_root.json from the TUF repository. Continuing with individual targets. Error from TUF: %v", err)
+				if o.TrustedRootPath != "" {
+					ko.TrustedMaterial, err = root.NewTrustedRootFromPath(o.TrustedRootPath)
+					if err != nil {
+						return fmt.Errorf("loading trusted root: %w", err)
+					}
+				} else {
+					trustedMaterial, err := cosign.TrustedRoot()
+					if err != nil {
+						ui.Warnf(context.Background(), "Could not fetch trusted_root.json from the TUF repository. Continuing with individual targets. Error from TUF: %v", err)
+					}
+					ko.TrustedMaterial = trustedMaterial
 				}
-				ko.TrustedMaterial = trustedMaterial
 			}
+			if (o.UseSigningConfig || o.SigningConfigPath != "") && o.BundlePath == "" {
+				return fmt.Errorf("must provide --bundle with --signing-config or --use-signing-config")
+			}
+			if o.UseSigningConfig {
+				signingConfig, err := cosign.SigningConfig()
+				if err != nil {
+					return fmt.Errorf("error getting signing config from TUF: %w", err)
+				}
+				ko.SigningConfig = signingConfig
+			} else if o.SigningConfigPath != "" {
+				signingConfig, err := root.NewSigningConfigFromPath(o.SigningConfigPath)
+				if err != nil {
+					return fmt.Errorf("error reading signing config from file: %w", err)
+				}
+				ko.SigningConfig = signingConfig
+			}
+
 			v := attest.AttestBlobCommand{
 				KeyOpts:           ko,
 				CertPath:          o.Cert,

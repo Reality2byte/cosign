@@ -109,6 +109,7 @@ against the transparency log.`,
 			v := &verify.VerifyCommand{
 				RegistryOptions:              o.Registry,
 				CertVerifyOptions:            o.CertVerify,
+				CommonVerifyOptions:          o.CommonVerifyOptions,
 				CheckClaims:                  o.CheckClaims,
 				KeyRef:                       o.Key,
 				CertRef:                      o.CertVerify.Cert,
@@ -138,6 +139,7 @@ against the transparency log.`,
 				MaxWorkers:                   o.CommonVerifyOptions.MaxWorkers,
 				ExperimentalOCI11:            o.CommonVerifyOptions.ExperimentalOCI11,
 				UseSignedTimestamps:          o.CommonVerifyOptions.UseSignedTimestamps,
+				NewBundleFormat:              o.CommonVerifyOptions.NewBundleFormat,
 			}
 
 			if o.CommonVerifyOptions.MaxWorkers == 0 {
