@@ -94,14 +94,14 @@ jobs:
           persist-credentials: false
 
       - name: setup vault
-        uses: cpanato/vault-installer@e7c1d664fa15219e89e43739e39a9df11ba00849 # v1.2.0
+        uses: cpanato/vault-installer@fe568170412f5d81202ec528148f05176efbecc1 # v1.4.0
 
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: 'go.mod'
           check-latest: true
 
-      - uses: imjasonh/setup-crane@31b88efe9de28ae0ffa220711af4b60be9435f6e # v0.4
+      - uses: imjasonh/setup-crane@6da1ae018866400525525ce74ff892880c099987 # v0.5
 
       - name: Install cluster + sigstore
         uses: sigstore/scaffolding/actions/setup@main
@@ -220,4 +220,4 @@ jobs:
 
     - name: Collect diagnostics
       if: ${{ failure() }}
-      uses: chainguard-dev/actions/kind-diag@708219d4822f33611ac1a2653815cc10e1ab54a6 # v1.4.7
+      uses: chainguard-dev/actions/kind-diag@eba358c567c5b091e34187d905258baebdd2a4ec # v1.5.16
