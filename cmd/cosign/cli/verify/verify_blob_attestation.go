@@ -1,5 +1,5 @@
 //
-// Copyright 2022 the Sigstore Authors.
+// Copyright 2022 The Sigstore Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@ package verify
 import (
 	"context"
 	"crypto"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -30,22 +29,16 @@ import (
 	"path/filepath"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/rekor"
-	internal "github.com/sigstore/cosign/v2/internal/pkg/cosign"
-	payloadsize "github.com/sigstore/cosign/v2/internal/pkg/cosign/payload/size"
-	"github.com/sigstore/cosign/v2/internal/ui"
-	"github.com/sigstore/cosign/v2/pkg/blob"
-	"github.com/sigstore/cosign/v2/pkg/cosign"
-	"github.com/sigstore/cosign/v2/pkg/cosign/bundle"
-	"github.com/sigstore/cosign/v2/pkg/cosign/env"
-	"github.com/sigstore/cosign/v2/pkg/cosign/pivkey"
-	"github.com/sigstore/cosign/v2/pkg/cosign/pkcs11key"
-	"github.com/sigstore/cosign/v2/pkg/oci/static"
-	"github.com/sigstore/cosign/v2/pkg/policy"
-	sigs "github.com/sigstore/cosign/v2/pkg/signature"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/options"
+	internal "github.com/sigstore/cosign/v3/internal/pkg/cosign"
+	payloadsize "github.com/sigstore/cosign/v3/internal/pkg/cosign/payload/size"
+	"github.com/sigstore/cosign/v3/internal/ui"
+	"github.com/sigstore/cosign/v3/pkg/blob"
+	"github.com/sigstore/cosign/v3/pkg/cosign"
+	"github.com/sigstore/cosign/v3/pkg/cosign/bundle"
+	"github.com/sigstore/cosign/v3/pkg/oci/static"
+	"github.com/sigstore/cosign/v3/pkg/policy"
 	sgbundle "github.com/sigstore/sigstore-go/pkg/bundle"
-	"github.com/sigstore/sigstore-go/pkg/root"
 	sgverify "github.com/sigstore/sigstore-go/pkg/verify"
 	"github.com/sigstore/sigstore/pkg/cryptoutils"
 )
@@ -80,8 +73,11 @@ type VerifyBlobAttestationCommand struct {
 	SignaturePath       string // Path to the signature
 	UseSignedTimestamps bool
 
-	Digest    string
-	DigestAlg string
+	Digest        string
+	DigestAlg     string
+	HashAlgorithm crypto.Hash
+
+	AllowCertificateChain bool
 }
 
 // Exec runs the verification command
@@ -90,9 +86,18 @@ func (c *VerifyBlobAttestationCommand) Exec(ctx context.Context, artifactPath st
 		return fmt.Errorf("please specify path to the DSSE envelope signature via --signature or --bundle")
 	}
 
+	// c.HashAlgorithm may be 0 (unset) here, in which case LoadVerifierFromKeyOrCert
+	// picks the digest algorithm that matches the provided key, rather than assuming
+	// SHA256 for keys that require a different algorithm (e.g. P-521 ECDSA keys).
+
 	// Require a certificate/key OR a local bundle file that has the cert.
 	if options.NOf(c.KeyRef, c.CertRef, c.Sk, c.BundlePath) == 0 {
 		return fmt.Errorf("provide a key with --key or --sk, a certificate to verify against with --certificate, or a bundle with --bundle")
+	}
+
+	// key and cert identity are mutually exclusive
+	if options.NOf(c.KeyRef, c.CertIdentity, c.CertIdentityRegexp) > 1 {
+		return &options.KeyAndIdentityParseError{}
 	}
 
 	// We can't have both a key and a security key
@@ -101,7 +106,7 @@ func (c *VerifyBlobAttestationCommand) Exec(ctx context.Context, artifactPath st
 	}
 
 	var identities []cosign.Identity
-	if c.KeyRef == "" {
+	if c.KeyRef == "" && !c.Sk {
 		identities, err = c.Identities()
 		if err != nil {
 			return err
@@ -119,51 +124,43 @@ func (c *VerifyBlobAttestationCommand) Exec(ctx context.Context, artifactPath st
 		Offline:                      c.Offline,
 		IgnoreTlog:                   c.IgnoreTlog,
 		UseSignedTimestamps:          c.TSACertChainPath != "" || c.UseSignedTimestamps,
-		NewBundleFormat:              c.NewBundleFormat || checkNewBundle(c.BundlePath),
+		AllowCertificateChain:        c.AllowCertificateChain,
 	}
+	co.NewBundleFormat = c.NewBundleFormat && checkNewBundle(c.BundlePath, co.BundleOptions()...)
+	vOfflineKey := verifyOfflineWithKey(c.KeyRef, c.CertRef, c.Sk, co)
 
-	// Keys are optional!
+	// User provides a key or certificate. Otherwise, verification requires a Fulcio certificate
+	// provided in an attached bundle or OCI annotation.
+	var closeSV func()
 	var cert *x509.Certificate
-	opts := make([]static.Option, 0)
-	switch {
-	case c.KeyRef != "":
-		co.SigVerifier, err = sigs.PublicKeyFromKeyRef(ctx, c.KeyRef)
-		if err != nil {
-			return fmt.Errorf("loading public key: %w", err)
-		}
-		pkcs11Key, ok := co.SigVerifier.(*pkcs11key.Key)
-		if ok {
-			defer pkcs11Key.Close()
-		}
-	case c.Sk:
-		sk, err := pivkey.GetKeyWithSlot(c.Slot)
-		if err != nil {
-			return fmt.Errorf("opening piv token: %w", err)
-		}
-		defer sk.Close()
-		co.SigVerifier, err = sk.Verifier()
-		if err != nil {
-			return fmt.Errorf("loading public key from token: %w", err)
-		}
-	case c.CertRef != "":
-		cert, err = loadCertFromFileOrURL(c.CertRef)
-		if err != nil {
-			return err
-		}
-	case c.CARoots != "":
-		// CA roots + possible intermediates are already loaded into co.RootCerts with the call to
-		// loadCertsKeylessVerification above.
+	co.SigVerifier, cert, closeSV, err = LoadVerifierFromKeyOrCert(ctx, c.KeyRef, c.Slot, c.CertRef, "", c.HashAlgorithm, c.Sk, true, co)
+	if err != nil {
+		return fmt.Errorf("loading verifier from key opts: %w", err)
 	}
+	defer closeSV()
 
 	var h v1.Hash
 	var digest []byte
 	if c.CheckClaims {
 		if artifactPath != "" {
-			if c.Digest != "" && c.DigestAlg != "" {
-				ui.Warnf(ctx, "Ignoring provided digest and digestAlg in favor of provided blob")
+			if c.Digest != "" {
+				ui.Warnf(ctx, "Ignoring provided --digest in favor of provided blob")
 			}
-			// Get the actual digest of the blob
-			var payload internal.HashReader
+			// For the legacy (non-bundle) verification path we still need to
+			// compute the digest manually.  Pick the hash algorithm to use:
+			// default to SHA-256 for backward compatibility; honor --digestAlg
+			// so attestations produced against e.g. SHA-512 can be verified.
+			hashName := "sha256"
+			hashAlg := crypto.SHA256
+			if c.DigestAlg != "" {
+				parsed, err := parseBlobHashAlgorithm(c.DigestAlg)
+				if err != nil {
+					return err
+				}
+				hashName = c.DigestAlg
+				hashAlg = parsed
+			}
+
 			f, err := os.Open(filepath.Clean(artifactPath))
 			if err != nil {
 				return err
@@ -178,14 +175,14 @@ func (c *VerifyBlobAttestationCommand) Exec(ctx context.Context, artifactPath st
 				return err
 			}
 
-			payload = internal.NewHashReader(f, sha256.New())
+			payload := internal.NewHashReader(f, hashAlg)
 			if _, err := io.ReadAll(&payload); err != nil {
 				return err
 			}
 			digest = payload.Sum(nil)
 			h = v1.Hash{
 				Hex:       hex.EncodeToString(digest),
-				Algorithm: "sha256",
+				Algorithm: hashName,
 			}
 		} else if c.Digest != "" && c.DigestAlg != "" {
 			digest, err = hex.DecodeString(c.Digest)
@@ -200,39 +197,77 @@ func (c *VerifyBlobAttestationCommand) Exec(ctx context.Context, artifactPath st
 		co.ClaimVerifier = cosign.IntotoSubjectClaimVerifier
 	}
 
-	if c.TrustedRootPath != "" {
-		co.TrustedMaterial, err = root.NewTrustedRootFromPath(c.TrustedRootPath)
-		if err != nil {
-			return fmt.Errorf("loading trusted root: %w", err)
-		}
-	} else if options.NOf(c.CertChain, c.CARoots, c.CAIntermediates, c.TSACertChainPath) == 0 &&
-		env.Getenv(env.VariableSigstoreCTLogPublicKeyFile) == "" &&
-		env.Getenv(env.VariableSigstoreRootFile) == "" &&
-		env.Getenv(env.VariableSigstoreRekorPublicKey) == "" &&
-		env.Getenv(env.VariableSigstoreTSACertificateFile) == "" {
-		co.TrustedMaterial, err = cosign.TrustedRoot()
-		if err != nil {
-			ui.Warnf(ctx, "Could not fetch trusted_root.json from the TUF repository. Continuing with individual targets. Error from TUF: %v", err)
-		}
+	err = SetTrustedMaterial(ctx, c.TrustedRootPath, c.CertChain, c.CARoots, c.CAIntermediates, c.TSACertChainPath, vOfflineKey, co)
+	if err != nil {
+		return fmt.Errorf("setting trusted material: %w", err)
+	}
+
+	if err = CheckSigstoreBundleUnsupportedOptions(*c, vOfflineKey, co); err != nil {
+		return err
 	}
 
 	if co.NewBundleFormat {
-		if options.NOf(c.RFC3161TimestampPath, c.TSACertChainPath, c.CertChain, c.CARoots, c.CAIntermediates, c.CertRef, c.SCTRef) > 0 {
-			return fmt.Errorf("when using --new-bundle-format, please supply signed content with --bundle and verification content with --trusted-root")
-		}
-
-		if co.TrustedMaterial == nil {
-			return fmt.Errorf("trusted root is required when using new bundle format")
-		}
-
-		bundle, err := sgbundle.LoadJSONFromPath(c.BundlePath)
+		bundle, err := sgbundle.LoadJSONFromPath(c.BundlePath, co.BundleOptions()...)
 		if err != nil {
 			return err
 		}
 
-		_, err = cosign.VerifyNewBundle(ctx, co, sgverify.WithArtifactDigest(h.Algorithm, digest), bundle)
+		var policyOpt sgverify.ArtifactPolicyOption
+		switch {
+		case !c.CheckClaims:
+			policyOpt = sgverify.WithoutArtifactUnsafe()
+		case artifactPath != "":
+			// Pass the artifact directly so sigstore-go can peek at the bundle
+			// and choose the correct hash algorithm automatically, rather than
+			// requiring the caller to supply --digestAlg up-front.
+			artifactFile, err := os.Open(filepath.Clean(artifactPath))
+			if err != nil {
+				return err
+			}
+			defer artifactFile.Close()
+			policyOpt = sgverify.WithArtifact(artifactFile)
+		default:
+			policyOpt = sgverify.WithArtifactDigest(h.Algorithm, digest)
+		}
+
+		_, err = cosign.VerifyNewBundle(ctx, co, policyOpt, bundle)
 		if err != nil {
 			return err
+		}
+
+		sigContent, err := bundle.SignatureContent()
+		if err != nil {
+			return fmt.Errorf("fetching signature content: %w", err)
+		}
+
+		envContent := sigContent.EnvelopeContent()
+		if envContent == nil {
+			return fmt.Errorf("bundle does not contain a DSSE envelope")
+		}
+
+		rawEnv := envContent.RawEnvelope()
+		if rawEnv == nil {
+			return fmt.Errorf("bundle does not contain a raw DSSE envelope")
+		}
+
+		payloadBytes, err := json.Marshal(rawEnv)
+		if err != nil {
+			return fmt.Errorf("marshaling envelope: %w", err)
+		}
+
+		att, err := static.NewAttestation(payloadBytes)
+		if err != nil {
+			return fmt.Errorf("creating attestation from envelope: %w", err)
+		}
+
+		// This checks the predicate type -- if no error is returned and no payload is, then
+		// the attestation is not of the given predicate type.
+		b, gotPredicateType, err := policy.AttestationToPayloadJSON(ctx, c.PredicateType, att)
+		if err != nil {
+			return fmt.Errorf("converting to consumable policy validation: %w", err)
+		}
+		if b == nil {
+			return fmt.Errorf("invalid predicate type, expected %s got %s", c.PredicateType, gotPredicateType)
 		}
 
 		ui.Infof(ctx, "Verified OK")
@@ -247,45 +282,10 @@ func (c *VerifyBlobAttestationCommand) Exec(ctx context.Context, artifactPath st
 	} else if c.RFC3161TimestampPath == "" && co.UseSignedTimestamps {
 		return fmt.Errorf("when specifying --use-signed-timestamps or --timestamp-certificate-chain, you must also specify --rfc3161-timestamp-path")
 	}
-	if co.UseSignedTimestamps && co.TrustedMaterial == nil {
-		tsaCertificates, err := cosign.GetTSACerts(ctx, c.TSACertChainPath, cosign.GetTufTargets)
-		if err != nil {
-			return fmt.Errorf("unable to load TSA certificates: %w", err)
-		}
-		co.TSACertificate = tsaCertificates.LeafCert
-		co.TSARootCertificates = tsaCertificates.RootCert
-		co.TSAIntermediateCertificates = tsaCertificates.IntermediateCerts
-	}
 
-	if !c.IgnoreTlog {
-		if c.RekorURL != "" {
-			rekorClient, err := rekor.NewClient(c.RekorURL)
-			if err != nil {
-				return fmt.Errorf("creating Rekor client: %w", err)
-			}
-			co.RekorClient = rekorClient
-		}
-		if co.TrustedMaterial == nil {
-			// This performs an online fetch of the Rekor public keys, but this is needed
-			// for verifying tlog entries (both online and offline).
-			co.RekorPubKeys, err = cosign.GetRekorPubs(ctx)
-			if err != nil {
-				return fmt.Errorf("getting Rekor public keys: %w", err)
-			}
-		}
-	}
-	if co.TrustedMaterial == nil && keylessVerification(c.KeyRef, c.Sk) {
-		if err := loadCertsKeylessVerification(c.CertChain, c.CARoots, c.CAIntermediates, co); err != nil {
-			return err
-		}
-	}
-
-	// Ignore Signed Certificate Timestamp if the flag is set or a key is provided
-	if co.TrustedMaterial == nil && shouldVerifySCT(c.IgnoreSCT, c.KeyRef, c.Sk) {
-		co.CTLogPubKeys, err = cosign.GetCTLogPubs(ctx)
-		if err != nil {
-			return fmt.Errorf("getting ctlog public keys: %w", err)
-		}
+	err = SetLegacyClientsAndKeys(ctx, c.IgnoreTlog, shouldVerifySCT(c.IgnoreSCT, c.KeyRef, c.Sk), keylessVerification(c.KeyRef, c.Sk), c.RekorURL, c.TSACertChainPath, c.CertChain, c.CARoots, c.CAIntermediates, co)
+	if err != nil {
+		return fmt.Errorf("setting up clients and keys: %w", err)
 	}
 
 	var encodedSig []byte
@@ -296,37 +296,31 @@ func (c *VerifyBlobAttestationCommand) Exec(ctx context.Context, artifactPath st
 		}
 	}
 
+	opts := make([]static.Option, 0)
 	if c.BundlePath != "" {
 		b, err := cosign.FetchLocalSignedPayloadFromPath(c.BundlePath)
 		if err != nil {
 			return err
 		}
-		// A certificate is required in the bundle unless we specified with
-		//  --key, --sk, or --certificate.
-		if b.Cert == "" && co.SigVerifier == nil && cert == nil {
-			return fmt.Errorf("bundle does not contain cert for verification, please provide public key")
-		}
-		// We have to condition on this because sign-blob may not output the signing
-		// key to the bundle when there is no tlog upload.
 		if b.Cert != "" {
-			// b.Cert can either be a certificate or public key
 			certBytes := []byte(b.Cert)
 			if isb64(certBytes) {
 				certBytes, _ = base64.StdEncoding.DecodeString(b.Cert)
 			}
 			bundleCert, err := loadCertFromPEM(certBytes)
 			if err != nil {
-				// check if cert is actually a public key
-				co.SigVerifier, err = sigs.LoadPublicKeyRaw(certBytes, crypto.SHA256)
-				if err != nil {
-					return fmt.Errorf("loading verifier from bundle: %w", err)
-				}
+				return fmt.Errorf("loading verifier certificate from bundle: %w", err)
 			}
 			// if a cert was passed in, make sure it matches the cert in the bundle
 			if cert != nil && !cert.Equal(bundleCert) {
 				return fmt.Errorf("the cert passed in does not match the cert in the provided bundle")
 			}
 			cert = bundleCert
+		}
+		// A verifier must come either from a certificate from the bundle,
+		// or provided via --key, --sk, or --certificate.
+		if co.SigVerifier == nil && cert == nil {
+			return fmt.Errorf("bundle does not contain cert for verification, please provide public key")
 		}
 
 		encodedSig, err = base64.StdEncoding.DecodeString(b.Base64Signature)
@@ -403,10 +397,29 @@ func (c *VerifyBlobAttestationCommand) Exec(ctx context.Context, artifactPath st
 
 	// This checks the predicate type -- if no error is returned and no payload is, then
 	// the attestation is not of the given predicate type.
-	if b, gotPredicateType, err := policy.AttestationToPayloadJSON(ctx, c.PredicateType, signature); b == nil && err == nil {
+	b, gotPredicateType, err := policy.AttestationToPayloadJSON(ctx, c.PredicateType, signature)
+	if err != nil {
+		return fmt.Errorf("converting to consumable policy validation: %w", err)
+	}
+	if b == nil {
 		return fmt.Errorf("invalid predicate type, expected %s got %s", c.PredicateType, gotPredicateType)
 	}
 
 	fmt.Fprintln(os.Stderr, "Verified OK")
 	return nil
+}
+
+// parseBlobHashAlgorithm maps the --digestAlg name used by
+// verify-blob-attestation to a crypto.Hash. Only algorithms actually
+// supported as in-toto subject digest algorithms are accepted.
+func parseBlobHashAlgorithm(name string) (crypto.Hash, error) {
+	switch name {
+	case "sha256":
+		return crypto.SHA256, nil
+	case "sha384":
+		return crypto.SHA384, nil
+	case "sha512":
+		return crypto.SHA512, nil
+	}
+	return 0, fmt.Errorf("unsupported --digestAlg %q; supported values are sha256, sha384, sha512", name)
 }

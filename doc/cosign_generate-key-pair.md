@@ -1,6 +1,6 @@
 ## cosign generate-key-pair
 
-Generates a key-pair.
+Generates a key-pair
 
 ### Synopsis
 
@@ -45,6 +45,12 @@ cosign generate-key-pair [flags]
   # generate a key-pair in GitLab with project id
   cosign generate-key-pair gitlab://[PROJECT_ID]
 
+  # generate a key-pair in GitLab with group name (accessible to all projects in the group)
+  cosign generate-key-pair gitlab://[GROUP_NAME]
+
+  # generate a key-pair in GitLab with subgroup name
+  cosign generate-key-pair gitlab://[GROUP_NAME]/[SUBGROUP_NAME]
+
 CAVEATS:
   This command interactively prompts for a password. You can use
   the COSIGN_PASSWORD environment variable to provide one.
@@ -68,5 +74,5 @@ CAVEATS:
 
 ### SEE ALSO
 
-* [cosign](cosign.md)	 - A tool for Container Signing, Verification and Storage in an OCI registry.
+* [cosign](cosign.md)	 - A tool for Container Signing, Verification and Storage in an OCI registry
 

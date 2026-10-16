@@ -20,9 +20,9 @@ import (
 	"fmt"
 
 	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
-	"github.com/sigstore/cosign/v2/pkg/oci/layout"
-	"github.com/sigstore/cosign/v2/pkg/oci/remote"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/options"
+	"github.com/sigstore/cosign/v3/pkg/oci/layout"
+	"github.com/sigstore/cosign/v3/pkg/oci/remote"
 	"github.com/spf13/cobra"
 )
 
@@ -46,7 +46,7 @@ func Load() *cobra.Command {
 }
 
 func LoadCmd(ctx context.Context, opts options.LoadOptions, imageRef string) error {
-	ref, err := name.ParseReference(imageRef)
+	ref, err := name.ParseReference(imageRef, opts.Registry.NameOptions()...)
 	if err != nil {
 		return fmt.Errorf("parsing image name %s: %w", imageRef, err)
 	}
@@ -62,5 +62,5 @@ func LoadCmd(ctx context.Context, opts options.LoadOptions, imageRef string) err
 		return err
 	}
 
-	return remote.WriteSignedImageIndexImages(ref, sii, ociremoteOpts...)
+	return remote.WriteSignedImageIndexImages(ref, sii, opts.Directory, ociremoteOpts...)
 }

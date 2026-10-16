@@ -24,9 +24,9 @@ import (
 	"strings"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
-	payloadsize "github.com/sigstore/cosign/v2/internal/pkg/cosign/payload/size"
-	"github.com/sigstore/cosign/v2/pkg/cosign/bundle"
-	"github.com/sigstore/cosign/v2/pkg/oci"
+	payloadsize "github.com/sigstore/cosign/v3/internal/pkg/cosign/payload/size"
+	"github.com/sigstore/cosign/v3/pkg/cosign/bundle"
+	"github.com/sigstore/cosign/v3/pkg/oci"
 	"github.com/sigstore/sigstore/pkg/cryptoutils"
 )
 
@@ -107,6 +107,9 @@ func (s *sigLayer) Cert() (*x509.Certificate, error) {
 	certs, err := cryptoutils.LoadCertificatesFromPEM(strings.NewReader(certPEM))
 	if err != nil {
 		return nil, err
+	}
+	if len(certs) == 0 {
+		return nil, nil
 	}
 	return certs[0], nil
 }

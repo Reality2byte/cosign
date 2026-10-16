@@ -32,9 +32,9 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/ThalesIgnite/crypto11"
+	"github.com/eclipse-keypont/crypto11"
 	"github.com/miekg/pkcs11"
-	"github.com/sigstore/cosign/v2/pkg/cosign/env"
+	"github.com/sigstore/cosign/v3/pkg/cosign/env"
 	"github.com/sigstore/sigstore/pkg/signature"
 	"golang.org/x/term"
 )
@@ -172,6 +172,12 @@ func GetKeyWithURIConfig(config *Pkcs11UriConfig, askForPinIfNeeded bool) (*Key,
 	}
 	if err != nil {
 		return nil, err
+	}
+	// FindKeyPair returns a nil signer with a nil error when no matching
+	// key pair is found, so we must check explicitly to avoid handing back
+	// a Key with a nil signer, which would later panic on use.
+	if signer == nil {
+		return nil, fmt.Errorf("%w: no key pair found for id=%q label=%q in slot/token", SignerNotSet, config.KeyID, config.KeyLabel)
 	}
 
 	// Key's corresponding cert might not exist,

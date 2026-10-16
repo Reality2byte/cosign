@@ -32,6 +32,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -41,19 +42,20 @@ import (
 	"github.com/go-openapi/runtime"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	ggcrlayout "github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	"github.com/nozzle/throttler"
 	ssldsse "github.com/secure-systems-lab/go-securesystemslib/dsse"
-	"github.com/sigstore/cosign/v2/internal/pkg/cosign"
-	ociexperimental "github.com/sigstore/cosign/v2/internal/pkg/oci/remote"
-	"github.com/sigstore/cosign/v2/internal/ui"
-	"github.com/sigstore/cosign/v2/pkg/blob"
-	cbundle "github.com/sigstore/cosign/v2/pkg/cosign/bundle"
-	"github.com/sigstore/cosign/v2/pkg/oci"
-	"github.com/sigstore/cosign/v2/pkg/oci/layout"
-	ociremote "github.com/sigstore/cosign/v2/pkg/oci/remote"
-	"github.com/sigstore/cosign/v2/pkg/oci/static"
-	"github.com/sigstore/cosign/v2/pkg/types"
+	"github.com/sigstore/cosign/v3/internal/pkg/cosign"
+	ociexperimental "github.com/sigstore/cosign/v3/internal/pkg/oci/remote"
+	"github.com/sigstore/cosign/v3/internal/ui"
+	"github.com/sigstore/cosign/v3/pkg/blob"
+	cbundle "github.com/sigstore/cosign/v3/pkg/cosign/bundle"
+	"github.com/sigstore/cosign/v3/pkg/oci"
+	"github.com/sigstore/cosign/v3/pkg/oci/layout"
+	ociremote "github.com/sigstore/cosign/v3/pkg/oci/remote"
+	"github.com/sigstore/cosign/v3/pkg/oci/static"
+	"github.com/sigstore/cosign/v3/pkg/types"
 	protobundle "github.com/sigstore/protobuf-specs/gen/pb-go/bundle/v1"
 	"github.com/sigstore/rekor/pkg/generated/client"
 	"github.com/sigstore/rekor/pkg/generated/models"
@@ -73,7 +75,8 @@ import (
 	"github.com/sigstore/sigstore/pkg/signature/dsse"
 	"github.com/sigstore/sigstore/pkg/signature/options"
 	"github.com/sigstore/sigstore/pkg/tuf"
-	tsaverification "github.com/sigstore/timestamp-authority/pkg/verification"
+	tsaverification "github.com/sigstore/timestamp-authority/v2/pkg/verification"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 // Identity specifies an issuer/subject to verify a signature against.
@@ -174,6 +177,19 @@ type CheckOpts struct {
 
 	// NewBundleFormat enables the new bundle format (Cosign Bundle Spec) and the new verifier.
 	NewBundleFormat bool
+
+	// AllowCertificateChain permits bundles with version >= v0.3 to contain
+	// X.509 certificate chains in the verification material.
+	AllowCertificateChain bool
+}
+
+// BundleOptions returns sigstore-go bundle options based on CheckOpts.
+func (co *CheckOpts) BundleOptions() []sgbundle.Option {
+	var opts []sgbundle.Option
+	if co.AllowCertificateChain {
+		opts = append(opts, sgbundle.AllowCertificateChain())
+	}
+	return opts
 }
 
 type verifyTrustedMaterial struct {
@@ -190,8 +206,8 @@ func (v *verifyTrustedMaterial) PublicKeyVerifier(hint string) (root.TimeConstra
 
 // verificationOptions returns the verification options for verifying with sigstore-go.
 func (co *CheckOpts) verificationOptions() (trustedMaterial root.TrustedMaterial, verifierOptions []verify.VerifierOption, policyOptions []verify.PolicyOption, err error) {
-	if co.TrustedMaterial == nil {
-		return nil, nil, nil, fmt.Errorf("TrustMaterial is required")
+	if co.TrustedMaterial == nil && co.SigVerifier == nil {
+		return nil, nil, nil, fmt.Errorf("a trusted root is required for identity-based verification")
 	}
 
 	policyOptions = make([]verify.PolicyOption, 0)
@@ -247,13 +263,29 @@ func (co *CheckOpts) verificationOptions() (trustedMaterial root.TrustedMaterial
 	}
 
 	if !co.IgnoreTlog {
-		verifierOptions = append(verifierOptions, verify.WithTransparencyLog(1), verify.WithIntegratedTimestamps(1))
+		verifierOptions = append(verifierOptions, verify.WithTransparencyLog(1))
+		// If you aren't using a signed timestamp, use the time from the transparency log
+		// to verify Fulcio certificates, or require no timestamp to verify a key.
+		// For Rekor v2, a signed timestamp must be provided.
+		if !co.UseSignedTimestamps {
+			if co.SigVerifier == nil {
+				verifierOptions = append(verifierOptions, verify.WithIntegratedTimestamps(1))
+			} else {
+				verifierOptions = append(verifierOptions, verify.WithNoObserverTimestamps())
+			}
+		}
 	}
 	if co.UseSignedTimestamps {
 		verifierOptions = append(verifierOptions, verify.WithSignedTimestamps(1))
 	}
+	// A time verification policy must be provided. Without a signed timestamp or integrated timestamp,
+	// verify a certificate with the current time, or require no timestamp to verify a key.
 	if co.IgnoreTlog && !co.UseSignedTimestamps {
-		verifierOptions = append(verifierOptions, verify.WithCurrentTime())
+		if co.SigVerifier == nil {
+			verifierOptions = append(verifierOptions, verify.WithCurrentTime())
+		} else {
+			verifierOptions = append(verifierOptions, verify.WithNoObserverTimestamps())
+		}
 	}
 
 	return vTrustedMaterial, verifierOptions, policyOptions, nil
@@ -311,20 +343,36 @@ func verifyOCISignature(ctx context.Context, verifier signature.Verifier, sig pa
 	return verifier.VerifySignature(bytes.NewReader(signature), bytes.NewReader(payload), options.WithContext(ctx))
 }
 
+type verifierWithCertChain struct {
+	signature.Verifier
+	cert  *x509.Certificate
+	chain []*x509.Certificate
+}
+
+func (v *verifierWithCertChain) GetCert() *x509.Certificate {
+	return v.cert
+}
+
+func (v *verifierWithCertChain) GetChain() []*x509.Certificate {
+	return v.chain
+}
+
 // ValidateAndUnpackCert creates a Verifier from a certificate. Verifies that the
 // certificate chains up to a trusted root using intermediate certificate chain coming from CheckOpts.
 // Optionally verifies the subject and issuer of the certificate.
 func ValidateAndUnpackCert(cert *x509.Certificate, co *CheckOpts) (signature.Verifier, error) {
-	return ValidateAndUnpackCertWithIntermediates(cert, co, co.IntermediateCerts)
+	verifier, _, err := ValidateAndUnpackCertWithIntermediates(cert, co, co.IntermediateCerts)
+	return verifier, err
 }
 
 // ValidateAndUnpackCertWithIntermediates creates a Verifier from a certificate. Verifies that the
 // certificate chains up to a trusted root using intermediate cert passed as separate argument.
-// Optionally verifies the subject and issuer of the certificate.
-func ValidateAndUnpackCertWithIntermediates(cert *x509.Certificate, co *CheckOpts, intermediateCerts *x509.CertPool) (signature.Verifier, error) {
+// Optionally verifies the subject and issuer of the certificate. Returns the chain built from the
+// certificate pools. Clients must verify the validity of this chain against a provided timestamp.
+func ValidateAndUnpackCertWithIntermediates(cert *x509.Certificate, co *CheckOpts, intermediateCerts *x509.CertPool) (signature.Verifier, []*x509.Certificate, error) {
 	verifier, err := signature.LoadVerifier(cert.PublicKey, crypto.SHA256)
 	if err != nil {
-		return nil, fmt.Errorf("invalid certificate found on signature: %w", err)
+		return nil, nil, fmt.Errorf("invalid certificate found on signature: %w", err)
 	}
 
 	// Handle certificates where the Subject Alternative Name is not set to a supported
@@ -347,31 +395,37 @@ func ValidateAndUnpackCertWithIntermediates(cert *x509.Certificate, co *CheckOpt
 	var chains [][]*x509.Certificate
 	if co.TrustedMaterial != nil {
 		if chains, err = verify.VerifyLeafCertificate(cert.NotBefore, cert, co.TrustedMaterial); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	} else {
 		// If the trusted root is not available, use the verifiers from cosign (legacy).
 		chains, err = TrustedCert(cert, co.RootCerts, intermediateCerts)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
+	// handle if chains has more than one chain - grab first and print message
+	if len(chains) > 1 {
+		fmt.Fprintf(os.Stderr, "**Info** Multiple valid certificate chains found. Selecting the first for further verification.\n")
+	}
+	chain := chains[0]
+
 	err = CheckCertificatePolicy(cert, co)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// If IgnoreSCT is set, skip the SCT check
 	if co.IgnoreSCT {
-		return verifier, nil
+		return &verifierWithCertChain{Verifier: verifier, cert: cert, chain: chains[0]}, chains[0], nil
 	}
 	contains, err := ContainsSCT(cert.Raw)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !contains && len(co.SCT) == 0 {
-		return nil, &VerificationFailure{
+		return nil, nil, &VerificationFailure{
 			fmt.Errorf("certificate does not include required embedded SCT and no detached SCT was set"),
 		}
 	}
@@ -379,38 +433,33 @@ func ValidateAndUnpackCertWithIntermediates(cert *x509.Certificate, co *CheckOpt
 	// If trusted root is available and the SCT is embedded, use the verifiers from sigstore-go (preferred).
 	if co.TrustedMaterial != nil && contains {
 		if err := verify.VerifySignedCertificateTimestamp(chains, 1, co.TrustedMaterial); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return verifier, nil
+		return &verifierWithCertChain{Verifier: verifier, cert: cert, chain: chain}, chain, nil
 	}
 
-	// handle if chains has more than one chain - grab first and print message
-	if len(chains) > 1 {
-		fmt.Fprintf(os.Stderr, "**Info** Multiple valid certificate chains found. Selecting the first to verify the SCT.\n")
+	if len(chain) < 2 {
+		return nil, nil, errors.New("certificate chain must contain at least a certificate and its issuer")
 	}
 	if contains {
-		if err := VerifyEmbeddedSCT(context.Background(), chains[0], co.CTLogPubKeys); err != nil {
-			return nil, err
+		if err := VerifyEmbeddedSCT(context.Background(), chain, co.CTLogPubKeys); err != nil {
+			return nil, nil, err
 		}
-		return verifier, nil
-	}
-	chain := chains[0]
-	if len(chain) < 2 {
-		return nil, errors.New("certificate chain must contain at least a certificate and its issuer")
+		return &verifierWithCertChain{Verifier: verifier, cert: cert, chain: chain}, chain, nil
 	}
 	certPEM, err := cryptoutils.MarshalCertificateToPEM(chain[0])
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	chainPEM, err := cryptoutils.MarshalCertificatesToPEM(chain[1:])
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := VerifySCT(context.Background(), certPEM, chainPEM, co.SCT, co.CTLogPubKeys); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return verifier, nil
+	return &verifierWithCertChain{Verifier: verifier, cert: cert, chain: chain}, chain, nil
 }
 
 // CheckCertificatePolicy checks that the certificate subject and issuer match
@@ -834,6 +883,7 @@ func verifyInternal(ctx context.Context, sig oci.Signature, h v1.Hash,
 	}
 
 	verifier := co.SigVerifier
+	var verifierChain []*x509.Certificate
 	if verifier == nil {
 		// If we don't have a public key to check against, we can try a root cert.
 		cert, err := sig.Cert()
@@ -865,10 +915,12 @@ func verifyInternal(ctx context.Context, sig oci.Signature, h v1.Hash,
 		if pool == nil {
 			pool = co.IntermediateCerts
 		}
-		verifier, err = ValidateAndUnpackCertWithIntermediates(cert, co, pool)
+		verifier, chain, err = ValidateAndUnpackCertWithIntermediates(cert, co, pool)
 		if err != nil {
 			return false, err
 		}
+		// Remove the end-entity certificate from the chain, as that will come from sig.Cert()
+		verifierChain = chain[1:]
 	}
 
 	// 1. Perform cryptographic verification of the signature using the certificate's public key.
@@ -894,14 +946,14 @@ func verifyInternal(ctx context.Context, sig oci.Signature, h v1.Hash,
 
 		if acceptableRFC3161Time != nil {
 			// Verify the cert against the timestamp time.
-			if err := CheckExpiry(cert, *acceptableRFC3161Time); err != nil {
+			if err := CheckExpiry(cert, verifierChain, *acceptableRFC3161Time); err != nil {
 				return false, fmt.Errorf("checking expiry on certificate with timestamp: %w", err)
 			}
 			expirationChecked = true
 		}
 
 		if acceptableRekorBundleTime != nil {
-			if err := CheckExpiry(cert, *acceptableRekorBundleTime); err != nil {
+			if err := CheckExpiry(cert, verifierChain, *acceptableRekorBundleTime); err != nil {
 				return false, fmt.Errorf("checking expiry on certificate with bundle: %w", err)
 			}
 			expirationChecked = true
@@ -909,7 +961,7 @@ func verifyInternal(ctx context.Context, sig oci.Signature, h v1.Hash,
 
 		// if no timestamp has been provided, use the current time
 		if !expirationChecked {
-			if err := CheckExpiry(cert, time.Now()); err != nil {
+			if err := CheckExpiry(cert, verifierChain, time.Now()); err != nil {
 				// If certificate is expired and not signed timestamp was provided then error the following message. Otherwise throw an expiration error.
 				if co.IgnoreTlog && acceptableRFC3161Time == nil {
 					return false, &VerificationFailure{
@@ -929,15 +981,23 @@ func keyBytes(sig oci.Signature, co *CheckOpts) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// We have a public key.
+	var pub crypto.PublicKey
 	if co.SigVerifier != nil {
-		pub, err := co.SigVerifier.PublicKey(co.PKOpts...)
+		pub, err = co.SigVerifier.PublicKey(co.PKOpts...)
 		if err != nil {
 			return nil, err
 		}
-		return cryptoutils.MarshalPublicKeyToPEM(pub)
 	}
-	return cryptoutils.MarshalCertificateToPEM(cert)
+	if cert != nil && co.SigVerifier != nil {
+		if err := cryptoutils.EqualKeys(cert.PublicKey, pub); err != nil {
+			return nil, fmt.Errorf("both public key and certificate were provided but did not match")
+		}
+	}
+
+	if cert != nil {
+		return cryptoutils.MarshalCertificateToPEM(cert)
+	}
+	return cryptoutils.MarshalPublicKeyToPEM(pub)
 }
 
 // VerifyBlobSignature verifies a blob signature.
@@ -980,13 +1040,39 @@ func loadSignatureFromFile(ctx context.Context, sigRef string, signedImgRef name
 		if err != nil {
 			return nil, err
 		}
-		payload, err = ObsoletePayload(ctx, digest)
+		payload, err = ObsoletePayload(ctx, digest, co.Annotations)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	sig, err := static.NewSignature(payload, b64sig)
+	var opts []static.Option
+	if co.SigVerifier != nil {
+		if cb, ok := co.SigVerifier.(interface{ GetCert() *x509.Certificate }); ok {
+			if cert := cb.GetCert(); cert != nil {
+				var chain []*x509.Certificate
+				if ch, ok := co.SigVerifier.(interface{ GetChain() []*x509.Certificate }); ok {
+					chain = ch.GetChain()
+				}
+
+				certPEM, err := cryptoutils.MarshalCertificateToPEM(cert)
+				if err != nil {
+					return nil, err
+				}
+				var chainPEM []byte
+				if len(chain) > 0 {
+					chainPEM, err = cryptoutils.MarshalCertificatesToPEM(chain)
+					if err != nil {
+						return nil, err
+					}
+				}
+
+				opts = append(opts, static.WithCertChain(certPEM, chainPEM))
+			}
+		}
+	}
+
+	sig, err := static.NewSignature(payload, b64sig, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -997,13 +1083,13 @@ func loadSignatureFromFile(ctx context.Context, sigRef string, signedImgRef name
 
 // VerifyImageAttestations does all the main cosign checks in a loop, returning the verified attestations.
 // If there were no valid attestations, we return an error.
-func VerifyImageAttestations(ctx context.Context, signedImgRef name.Reference, co *CheckOpts) (checkedAttestations []oci.Signature, bundleVerified bool, err error) {
+func VerifyImageAttestations(ctx context.Context, signedImgRef name.Reference, co *CheckOpts, nameOpts ...name.Option) (checkedAttestations []oci.Signature, bundleVerified bool, err error) {
 	// Enforce this up front.
 	if co.RootCerts == nil && co.SigVerifier == nil && co.TrustedMaterial == nil {
 		return nil, false, errors.New("one of verifier, root certs, or TrustedMaterial is required")
 	}
 	if co.NewBundleFormat {
-		return verifyImageAttestationsSigstoreBundle(ctx, signedImgRef, co)
+		return verifyImageAttestationsSigstoreBundle(ctx, signedImgRef, co, nameOpts...)
 	}
 
 	// This is a carefully optimized sequence for fetching the attestations of
@@ -1036,6 +1122,11 @@ func VerifyLocalImageAttestations(ctx context.Context, path string, co *CheckOpt
 	// Enforce this up front.
 	if co.RootCerts == nil && co.SigVerifier == nil && co.TrustedMaterial == nil {
 		return nil, false, errors.New("one of verifier, root certs, or trusted root is required")
+	}
+
+	// Check for v3 bundles first (if NewBundleFormat is enabled)
+	if co.NewBundleFormat {
+		return verifyLocalImageAttestationsSigstoreBundle(ctx, path, co)
 	}
 
 	se, err := layout.SignedImageIndex(path)
@@ -1081,6 +1172,9 @@ func VerifyBlobAttestation(ctx context.Context, att oci.Signature, h v1.Hash, co
 }
 
 func VerifyImageAttestation(ctx context.Context, atts oci.Signatures, h v1.Hash, co *CheckOpts) (checkedAttestations []oci.Signature, bundleVerified bool, err error) {
+	if atts == nil {
+		return nil, false, errors.New("no attestations provided")
+	}
 	sl, err := atts.Get()
 	if err != nil {
 		return nil, false, err
@@ -1142,21 +1236,36 @@ func VerifyImageAttestation(ctx context.Context, atts oci.Signatures, h v1.Hash,
 	return checkedAttestations, bundleVerified, nil
 }
 
-// CheckExpiry confirms the time provided is within the valid period of the cert
-func CheckExpiry(cert *x509.Certificate, it time.Time) error {
+// CheckExpiry confirms the time provided is within the valid period of the certificate and optionally
+// all issuing CA certificates.
+func CheckExpiry(cert *x509.Certificate, issuingChain []*x509.Certificate, it time.Time) error {
 	ft := func(t time.Time) string {
 		return t.Format(time.RFC3339)
 	}
 	if cert.NotAfter.Before(it) {
 		return &VerificationFailure{
-			fmt.Errorf("certificate expired before signatures were entered in log: %s is before %s",
+			fmt.Errorf("certificate expired before observed time: %s is before %s",
 				ft(cert.NotAfter), ft(it)),
 		}
 	}
 	if cert.NotBefore.After(it) {
 		return &VerificationFailure{
-			fmt.Errorf("certificate was issued after signatures were entered in log: %s is after %s",
-				ft(cert.NotAfter), ft(it)),
+			fmt.Errorf("certificate was issued after observed time: %s is after %s",
+				ft(cert.NotBefore), ft(it)),
+		}
+	}
+	for _, c := range issuingChain {
+		if c.NotAfter.Before(it) {
+			return &VerificationFailure{
+				fmt.Errorf("issuing CA certificate expired before observed time: %s is before %s",
+					ft(c.NotAfter), ft(it)),
+			}
+		}
+		if c.NotBefore.After(it) {
+			return &VerificationFailure{
+				fmt.Errorf("issuing CA certificate was issued after observed time: %s is after %s",
+					ft(c.NotBefore), ft(it)),
+			}
 		}
 	}
 	return nil
@@ -1186,13 +1295,48 @@ func VerifyBundle(sig oci.Signature, co *CheckOpts) (bool, error) {
 		return false, errors.New("no trusted rekor public keys provided")
 	}
 
+	bundleBody, ok := bundle.Payload.Body.(string)
+	if !ok {
+		return false, errors.New("bundle payload body is not a string")
+	}
+
+	if err := compareSigs(bundleBody, sig); err != nil {
+		return false, err
+	}
+
+	if err := comparePublicKey(bundleBody, sig, co); err != nil {
+		return false, err
+	}
+
+	payload, err := sig.Payload()
+	if err != nil {
+		return false, fmt.Errorf("reading payload: %w", err)
+	}
+	signature, err := sig.Base64Signature()
+	if err != nil {
+		return false, fmt.Errorf("reading base64signature: %w", err)
+	}
+
+	alg, bundlehash, err := bundleHash(bundleBody, signature)
+	if err != nil {
+		return false, fmt.Errorf("computing bundle hash: %w", err)
+	}
+	h := sha256.Sum256(payload)
+	payloadHash := hex.EncodeToString(h[:])
+
+	if alg != "sha256" {
+		return false, fmt.Errorf("unexpected algorithm: %q", alg)
+	} else if bundlehash != payloadHash {
+		return false, fmt.Errorf("matching bundle to payload: bundle=%q, payload=%q", bundlehash, payloadHash)
+	}
+
 	if co.TrustedMaterial != nil {
 		payload := bundle.Payload
 		logID, err := hex.DecodeString(payload.LogID)
 		if err != nil {
 			return false, fmt.Errorf("decoding log ID: %w", err)
 		}
-		body, _ := base64.StdEncoding.DecodeString(payload.Body.(string))
+		body, _ := base64.StdEncoding.DecodeString(bundleBody)
 		entry, err := tlog.NewEntry(body, payload.IntegratedTime, payload.LogIndex, logID, bundle.SignedEntryTimestamp, nil)
 		if err != nil {
 			return false, fmt.Errorf("converting tlog entry: %w", err)
@@ -1200,6 +1344,7 @@ func VerifyBundle(sig oci.Signature, co *CheckOpts) (bool, error) {
 		if err := tlog.VerifySET(entry, co.TrustedMaterial.RekorLogs()); err != nil {
 			return false, fmt.Errorf("verifying bundle with trusted root: %w", err)
 		}
+
 		return true, nil
 	}
 	// Make sure all the rekorPubKeys are ecsda.PublicKeys
@@ -1207,14 +1352,6 @@ func VerifyBundle(sig oci.Signature, co *CheckOpts) (bool, error) {
 		if _, ok := v.PubKey.(*ecdsa.PublicKey); !ok {
 			return false, fmt.Errorf("rekor Public key for LogID %s is not type ecdsa.PublicKey", k)
 		}
-	}
-
-	if err := compareSigs(bundle.Payload.Body.(string), sig); err != nil {
-		return false, err
-	}
-
-	if err := comparePublicKey(bundle.Payload.Body.(string), sig, co); err != nil {
-		return false, err
 	}
 
 	pubKey, ok := co.RekorPubKeys.Keys[bundle.Payload.LogID]
@@ -1231,27 +1368,6 @@ func VerifyBundle(sig oci.Signature, co *CheckOpts) (bool, error) {
 		fmt.Fprintf(os.Stderr, "**Info** Successfully verified Rekor entry using an expired verification key\n")
 	}
 
-	payload, err := sig.Payload()
-	if err != nil {
-		return false, fmt.Errorf("reading payload: %w", err)
-	}
-	signature, err := sig.Base64Signature()
-	if err != nil {
-		return false, fmt.Errorf("reading base64signature: %w", err)
-	}
-
-	alg, bundlehash, err := bundleHash(bundle.Payload.Body.(string), signature)
-	if err != nil {
-		return false, fmt.Errorf("computing bundle hash: %w", err)
-	}
-	h := sha256.Sum256(payload)
-	payloadHash := hex.EncodeToString(h[:])
-
-	if alg != "sha256" {
-		return false, fmt.Errorf("unexpected algorithm: %q", alg)
-	} else if bundlehash != payloadHash {
-		return false, fmt.Errorf("matching bundle to payload: bundle=%q, payload=%q", bundlehash, payloadHash)
-	}
 	return true, nil
 }
 
@@ -1293,6 +1409,9 @@ func (s *sigContent) MessageSignatureContent() verify.MessageSignatureContent {
 // returns the timestamp value.
 // It returns (nil, nil) if there is no timestamp, or (nil, err) if there is an invalid timestamp or if
 // no root is provided with a timestamp.
+//
+// Note: This function does not perform CRL/OCSP certificate revocation checks.
+// Callers are responsible for validating the TSA certificate and trusted material provided via CheckOpts according to their policy.
 func VerifyRFC3161Timestamp(sig oci.Signature, co *CheckOpts) (*timestamp.Timestamp, error) {
 	ts, err := sig.RFC3161Timestamp()
 	switch {
@@ -1337,6 +1456,9 @@ func VerifyRFC3161Timestamp(sig oci.Signature, co *CheckOpts) (*timestamp.Timest
 		}
 		if len(verifyErrs) > 0 {
 			log.Printf("Warning: subset of signed timestamps failed to verify: %v", verifyErrs)
+		}
+		if len(verifiedTimestamps) == 0 {
+			return nil, fmt.Errorf("expected at least one verified timestamp")
 		}
 		return &timestamp.Timestamp{Time: verifiedTimestamps[0].Time}, nil
 	}
@@ -1419,26 +1541,47 @@ func extractEntryImpl(bundleBody string) (rekor_types.EntryImpl, error) {
 	return rekor_types.UnmarshalEntry(pe)
 }
 
+func hashFields(algorithm, value *string) (string, string, error) {
+	if algorithm == nil || value == nil {
+		return "", "", errors.New("bundle entry hash is missing its algorithm or value")
+	}
+	return *algorithm, *value, nil
+}
+
 func bundleHash(bundleBody, _ string) (string, string, error) {
 	ei, err := extractEntryImpl(bundleBody)
 	if err != nil {
 		return "", "", err
 	}
 
+	// The Rekor models mark these hash fields required, but each entry type's
+	// own validation decides what is enforced, and some accept an entry that
+	// carries no hash at all.
 	switch entry := ei.(type) {
 	case *dsse_v001.V001Entry:
-		return *entry.DSSEObj.EnvelopeHash.Algorithm, *entry.DSSEObj.EnvelopeHash.Value, nil
+		if h := entry.DSSEObj.EnvelopeHash; h != nil {
+			return hashFields(h.Algorithm, h.Value)
+		}
 	case *hashedrekord_v001.V001Entry:
-		return *entry.HashedRekordObj.Data.Hash.Algorithm, *entry.HashedRekordObj.Data.Hash.Value, nil
+		if d := entry.HashedRekordObj.Data; d != nil && d.Hash != nil {
+			return hashFields(d.Hash.Algorithm, d.Hash.Value)
+		}
 	case *intoto_v001.V001Entry:
-		return *entry.IntotoObj.Content.Hash.Algorithm, *entry.IntotoObj.Content.Hash.Value, nil
+		if c := entry.IntotoObj.Content; c != nil && c.Hash != nil {
+			return hashFields(c.Hash.Algorithm, c.Hash.Value)
+		}
 	case *intoto_v002.V002Entry:
-		return *entry.IntotoObj.Content.Hash.Algorithm, *entry.IntotoObj.Content.Hash.Value, nil
+		if c := entry.IntotoObj.Content; c != nil && c.Hash != nil {
+			return hashFields(c.Hash.Algorithm, c.Hash.Value)
+		}
 	case *rekord_v001.V001Entry:
-		return *entry.RekordObj.Data.Hash.Algorithm, *entry.RekordObj.Data.Hash.Value, nil
+		if d := entry.RekordObj.Data; d != nil && d.Hash != nil {
+			return hashFields(d.Hash.Algorithm, d.Hash.Value)
+		}
 	default:
 		return "", "", errors.New("unsupported type")
 	}
+	return "", "", errors.New("no hash found in bundle entry")
 }
 
 // bundleSig extracts the signature from the rekor bundle body
@@ -1602,10 +1745,10 @@ func verifyImageSignaturesExperimentalOCI(ctx context.Context, signedImgRef name
 	return verifySignatures(ctx, sigs, h, co)
 }
 
-func getBundles(_ context.Context, signedImgRef name.Reference, co *CheckOpts) ([]*sgbundle.Bundle, *v1.Hash, error) {
+func GetBundles(_ context.Context, signedImgRef name.Reference, registryClientOpts []ociremote.Option, nameOpts ...name.Option) ([]*sgbundle.Bundle, *v1.Hash, error) {
 	// This is a carefully optimized sequence for fetching the signatures of the
 	// entity that minimizes registry requests when supplied with a digest input
-	digest, err := ociremote.ResolveDigest(signedImgRef, co.RegistryClientOpts...)
+	digest, err := ociremote.ResolveDigest(signedImgRef, registryClientOpts...)
 	if err != nil {
 		if terr := (&transport.Error{}); errors.As(err, &terr) && terr.StatusCode == http.StatusNotFound {
 			return nil, nil, &ErrImageTagNotFound{
@@ -1619,17 +1762,23 @@ func getBundles(_ context.Context, signedImgRef name.Reference, co *CheckOpts) (
 		return nil, nil, err
 	}
 
-	index, err := ociremote.Referrers(digest, "", co.RegistryClientOpts...)
+	index, err := ociremote.Referrers(digest, "", registryClientOpts...)
 	if err != nil {
 		return nil, nil, err
 	}
+
+	bundleRepo := digest.Repository
+	if targetRepo := ociremote.TargetRepositoryFromOptions(registryClientOpts...); (targetRepo != name.Repository{}) {
+		bundleRepo = targetRepo
+	}
+
 	var bundles = make([]*sgbundle.Bundle, 0, len(index.Manifests))
 	for _, result := range index.Manifests {
-		st, err := name.ParseReference(fmt.Sprintf("%s@%s", digest.Repository, result.Digest.String()))
+		st, err := name.ParseReference(fmt.Sprintf("%s@%s", bundleRepo, result.Digest.String()), nameOpts...)
 		if err != nil {
 			return nil, nil, err
 		}
-		bundle, err := ociremote.Bundle(st, co.RegistryClientOpts...)
+		bundle, err := ociremote.Bundle(st, registryClientOpts...)
 		if err != nil {
 			// There may be non-Sigstore referrers in the index, so we can ignore them.
 			// TODO: Should we surface any errors here (e.g. if the bundle is invalid)?
@@ -1647,9 +1796,154 @@ func getBundles(_ context.Context, signedImgRef name.Reference, co *CheckOpts) (
 	return bundles, &h, nil
 }
 
+// bundleDescriptor holds the digest and path to a bundle blob in a local OCI layout
+type bundleDescriptor struct {
+	digest   v1.Hash
+	blobPath string
+}
+
+// HasLocalBundles checks if a local OCI layout has v3 sigstore bundles.
+// V3 bundles are stored as separate images with layers having
+// media type "application/vnd.dev.sigstore.bundle".
+func HasLocalBundles(path string) (bool, error) {
+	return hasLocalSigstoreBundles(path)
+}
+
+// HasLocalAttestationBundles checks if a local OCI layout has v3 sigstore bundles for attestations.
+// For v3, both signatures and attestations use the same bundle format.
+func HasLocalAttestationBundles(path string) (bool, error) {
+	return hasLocalSigstoreBundles(path)
+}
+
+// GetLocalBundles retrieves v3 sigstore bundles from a local OCI layout.
+// Returns bundles, target image hash, and error. Invalid bundles are logged and skipped.
+func GetLocalBundles(path string, bundleOpts ...sgbundle.Option) ([]*sgbundle.Bundle, *v1.Hash, error) {
+	descriptors, hash, err := getLocalBundleDescriptors(path)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	bundles := make([]*sgbundle.Bundle, 0, len(descriptors))
+	for _, descriptor := range descriptors {
+		bundleBytes, err := os.ReadFile(filepath.Join(path, descriptor.blobPath))
+		if err != nil {
+			ui.Warnf(context.Background(), "Failed to read bundle blob %s: %v", descriptor.digest.Hex, err)
+			continue
+		}
+
+		pb := &protobundle.Bundle{}
+		if err := protojson.Unmarshal(bundleBytes, pb); err != nil {
+			ui.Warnf(context.Background(), "Failed to unmarshal bundle %s: %v", descriptor.digest.Hex, err)
+			continue
+		}
+		bundle, err := sgbundle.NewBundle(pb, bundleOpts...)
+		if err != nil {
+			ui.Warnf(context.Background(), "Failed to create bundle %s: %v", descriptor.digest.Hex, err)
+			continue
+		}
+
+		if !bundle.MinVersion("v0.3") {
+			ui.Warnf(context.Background(), "Bundle %s version too old (requires v0.3+)", descriptor.digest.Hex)
+			continue
+		}
+
+		bundles = append(bundles, bundle)
+	}
+
+	if len(bundles) == 0 {
+		return nil, nil, &ErrNoMatchingAttestations{
+			fmt.Errorf("no valid bundles found in local layout"),
+		}
+	}
+
+	return bundles, hash, nil
+}
+
+func hasLocalSigstoreBundles(path string) (bool, error) {
+	descriptors, _, err := getLocalBundleDescriptors(path)
+	if err != nil {
+		return false, err
+	}
+	return len(descriptors) > 0, nil
+}
+
+func getLocalBundleDescriptors(path string) ([]bundleDescriptor, *v1.Hash, error) {
+	p, err := ggcrlayout.FromPath(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading OCI layout from %s: %w", path, err)
+	}
+
+	ii, err := p.ImageIndex()
+	if err != nil {
+		return nil, nil, fmt.Errorf("getting image index: %w", err)
+	}
+
+	manifest, err := ii.IndexManifest()
+	if err != nil {
+		return nil, nil, fmt.Errorf("getting index manifest: %w", err)
+	}
+
+	// Find the target image digest from the index manifest
+	var targetDigest v1.Hash
+	for _, m := range manifest.Manifests {
+		if val, ok := m.Annotations["kind"]; ok && (val == "dev.cosignproject.cosign/image" || val == "dev.cosignproject.cosign/imageIndex") {
+			targetDigest = m.Digest
+			break
+		}
+	}
+	if targetDigest.String() == "" {
+		return nil, nil, nil
+	}
+
+	// Scan blobs/sha256 directory for referrer manifests
+	blobsDir := filepath.Join(path, "blobs", "sha256")
+	entries, err := os.ReadDir(blobsDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil, nil
+		}
+		return nil, nil, fmt.Errorf("reading blobs directory: %w", err)
+	}
+
+	var descriptors []bundleDescriptor
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		blobPath := filepath.Join(blobsDir, entry.Name())
+		data, err := os.ReadFile(blobPath)
+		if err != nil {
+			continue
+		}
+
+		// Try to parse as manifest (skip blobs that aren't manifests)
+		blobManifest, err := v1.ParseManifest(bytes.NewReader(data))
+		if err != nil {
+			continue
+		}
+
+		// Check if this is a referrer manifest pointing to our target
+		if blobManifest.Subject != nil && blobManifest.Subject.Digest == targetDigest {
+			// Collect bundle layer descriptors from this referrer manifest
+			for _, layer := range blobManifest.Layers {
+				if strings.HasPrefix(string(layer.MediaType), "application/vnd.dev.sigstore.bundle") {
+					// layer.Digest.Hex is validated by go-containerregistry to be a valid hex hash,
+					// but use filepath.Clean for defense-in-depth against path traversal
+					descriptors = append(descriptors, bundleDescriptor{
+						digest:   layer.Digest,
+						blobPath: filepath.Clean(filepath.Join("blobs", "sha256", layer.Digest.Hex)),
+					})
+				}
+			}
+		}
+	}
+
+	return descriptors, &targetDigest, nil
+}
+
 // verifyImageAttestationsSigstoreBundle verifies attestations from attached sigstore bundles
-func verifyImageAttestationsSigstoreBundle(ctx context.Context, signedImgRef name.Reference, co *CheckOpts) (checkedAttestations []oci.Signature, atLeastOneBundleVerified bool, err error) {
-	bundles, hash, err := getBundles(ctx, signedImgRef, co)
+func verifyImageAttestationsSigstoreBundle(ctx context.Context, signedImgRef name.Reference, co *CheckOpts, nameOpts ...name.Option) (checkedAttestations []oci.Signature, atLeastOneBundleVerified bool, err error) {
+	bundles, hash, err := GetBundles(ctx, signedImgRef, co.RegistryClientOpts, nameOpts...)
 	if err != nil {
 		return nil, false, err
 	}
@@ -1697,6 +1991,11 @@ func verifyImageAttestationsSigstoreBundle(ctx context.Context, signedImgRef nam
 				if err != nil {
 					return err
 				}
+				if co.ClaimVerifier != nil {
+					if err := co.ClaimVerifier(att, *hash, co.Annotations); err != nil {
+						return err
+					}
+				}
 				bundlesVerified[index] = true
 
 				return err
@@ -1726,6 +2025,75 @@ func verifyImageAttestationsSigstoreBundle(ctx context.Context, signedImgRef nam
 	if len(checkedAttestations) == 0 {
 		return nil, false, &ErrNoMatchingAttestations{
 			fmt.Errorf("no matching attestations: %w", errors.Join(t.Errs()...)),
+		}
+	}
+
+	return checkedAttestations, atLeastOneBundleVerified, nil
+}
+
+// verifyLocalImageAttestationsSigstoreBundle verifies attestations from local sigstore bundles
+func verifyLocalImageAttestationsSigstoreBundle(ctx context.Context, path string, co *CheckOpts) (checkedAttestations []oci.Signature, bundleVerified bool, err error) {
+	bundles, hash, err := GetLocalBundles(path, co.BundleOptions()...)
+	if err != nil {
+		return nil, false, err
+	}
+
+	digestBytes, err := hex.DecodeString(hash.Hex)
+	if err != nil {
+		return nil, false, err
+	}
+
+	artifactPolicyOption := verify.WithArtifactDigest(hash.Algorithm, digestBytes)
+
+	// For local bundles, we verify sequentially (local I/O is fast, no need for parallel throttler)
+	var atLeastOneBundleVerified bool
+	var errs []error
+	for _, bundle := range bundles {
+		_, err := VerifyNewBundle(ctx, co, artifactPolicyOption, bundle)
+		if err != nil {
+			// Log error and accumulate for final error message
+			errs = append(errs, err)
+			ui.Warnf(ctx, "Failed to verify bundle: %v", err)
+			continue
+		}
+
+		dsse, ok := bundle.Content.(*protobundle.Bundle_DsseEnvelope)
+		if !ok {
+			err := fmt.Errorf("bundle does not contain a DSSE envelope")
+			errs = append(errs, err)
+			ui.Warnf(ctx, "%v", err)
+			continue
+		}
+
+		payload, err := json.Marshal(dsse.DsseEnvelope)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("marshaling DSSE envelope: %w", err))
+			ui.Warnf(ctx, "Failed to marshal DSSE envelope: %v", err)
+			continue
+		}
+
+		att, err := static.NewAttestation(payload)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("creating attestation: %w", err))
+			ui.Warnf(ctx, "Failed to create attestation: %v", err)
+			continue
+		}
+
+		if co.ClaimVerifier != nil {
+			if err := co.ClaimVerifier(att, *hash, co.Annotations); err != nil {
+				errs = append(errs, fmt.Errorf("claim verification: %w", err))
+				ui.Warnf(ctx, "Claim verification failed: %v", err)
+				continue
+			}
+		}
+
+		checkedAttestations = append(checkedAttestations, att)
+		atLeastOneBundleVerified = true
+	}
+
+	if len(checkedAttestations) == 0 {
+		return nil, false, &ErrNoMatchingAttestations{
+			fmt.Errorf("no matching attestations: %w", errors.Join(errs...)),
 		}
 	}
 

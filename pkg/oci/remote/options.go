@@ -17,11 +17,13 @@ package remote
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
-	"github.com/sigstore/cosign/v2/pkg/cosign/env"
+	"github.com/sigstore/cosign/v3/pkg/cosign/env"
+	sgbundle "github.com/sigstore/sigstore-go/pkg/bundle"
 )
 
 const (
@@ -45,6 +47,7 @@ type options struct {
 	ROpt              []remote.Option
 	NameOpts          []name.Option
 	OriginalOptions   []Option
+	BundleOpts        []sgbundle.Option
 }
 
 var defaultOptions = []remote.Option{
@@ -129,6 +132,13 @@ func WithTargetRepository(repo name.Repository) Option {
 	}
 }
 
+// TargetRepositoryFromOptions extracts the TargetRepository that a
+// WithTargetRepository option would have set in the provided options.
+// Returns the zero name.Repository if no override was provided.
+func TargetRepositoryFromOptions(opts ...Option) name.Repository {
+	return makeOptions(name.Repository{}, opts...).TargetRepository
+}
+
 // GetEnvTargetRepository returns the Repository specified by
 // `os.Getenv(RepoOverrideEnvKey)`, or the empty value if not set.
 // Returns an error if the value is set but cannot be parsed.
@@ -136,6 +146,16 @@ func GetEnvTargetRepository() (name.Repository, error) {
 	if ro := env.Getenv(env.VariableRepository); ro != "" {
 		repo, err := name.NewRepository(ro)
 		if err != nil {
+			// A bare registry (e.g. "registry.example.com:5000", with no
+			// repository path) has no '/' to split on, so name.NewRepository
+			// treats the whole value as a repository name and rejects it for
+			// containing '.'/':' characters. That error is misleading: the
+			// real problem is that COSIGN_REPOSITORY must be a full
+			// repository, not just a registry.
+			if !strings.Contains(ro, "/") && (strings.Contains(ro, ".") || strings.Contains(ro, ":")) {
+				return name.Repository{}, fmt.Errorf("parsing $"+RepoOverrideEnvKey+": %q looks like a registry, but "+
+					RepoOverrideEnvKey+" must be a full repository (registry plus path), e.g. %q: %w", ro, ro+"/my-repo", err)
+			}
 			return name.Repository{}, fmt.Errorf("parsing $"+RepoOverrideEnvKey+": %w", err)
 		}
 		return repo, nil
@@ -148,5 +168,13 @@ func GetEnvTargetRepository() (name.Repository, error) {
 func WithNameOptions(opts ...name.Option) Option {
 	return func(o *options) {
 		o.NameOpts = opts
+	}
+}
+
+// WithBundleOptions is a functional option for passing sigstore-go bundle
+// options (e.g. AllowCertificateChain) when parsing bundles.
+func WithBundleOptions(opts ...sgbundle.Option) Option {
+	return func(o *options) {
+		o.BundleOpts = append(o.BundleOpts, opts...)
 	}
 }

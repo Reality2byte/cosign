@@ -16,8 +16,9 @@
 package options
 
 import (
-	"github.com/sigstore/cosign/v2/pkg/cosign"
+	"github.com/sigstore/cosign/v3/pkg/cosign"
 	"github.com/sigstore/sigstore-go/pkg/root"
+	"github.com/sigstore/sigstore/pkg/signature"
 )
 
 type KeyOpts struct {
@@ -49,14 +50,31 @@ type KeyOpts struct {
 	IssueCertificateForExistingKey bool
 
 	// FulcioAuthFlow is the auth flow to use when authenticating against
-	// Fulcio. See https://pkg.go.dev/github.com/sigstore/cosign/v2/cmd/cosign/cli/fulcio#pkg-constants
+	// Fulcio. See https://pkg.go.dev/github.com/sigstore/cosign/v3/cmd/cosign/cli/fulcio#pkg-constants
 	// for valid values.
 	FulcioAuthFlow string
 
+	// Deprecated: SCT verification is no longer performed during signing/attestation.
 	// Modeled after InsecureSkipVerify in tls.Config, this disables
 	// verifying the SCT.
 	InsecureSkipFulcioVerify bool
 
 	// TrustedMaterial contains trusted metadata for all Sigstore services. It is exclusive with RekorPubKeys, RootCerts, IntermediateCerts, CTLogPubKeys, and the TSA* cert fields.
 	TrustedMaterial root.TrustedMaterial
+
+	// SigningConfig contains the list of service URLs for Sigstore services.
+	SigningConfig *root.SigningConfig
+
+	// DefaultLoadOptions may be set to control the behaviour of
+	// `LoadDefaultSigner/Verifier` family of functions. Some public/private key
+	// types have ambiguities with regards to the signing algorithm to use (e.g.
+	// RSA can be RSASSA-PSS or RSASSA-PKCS1v15). This is a way to control that.
+	//
+	// By default, Ed25519ph is used for ed25519 keys and RSA-PKCS1v15 is used
+	// for RSA keys.
+	DefaultLoadOptions *[]signature.LoadOption
+
+	// SigningAlgorithm is the AlgorithmDetails string representation used to
+	// sign/hash the payload.
+	SigningAlgorithm string
 }

@@ -29,14 +29,14 @@ import (
 	"github.com/sigstore/sigstore/pkg/cryptoutils"
 	"github.com/sigstore/sigstore/pkg/signature"
 
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/rekor"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/verify"
-	"github.com/sigstore/cosign/v2/pkg/cosign"
-	"github.com/sigstore/cosign/v2/pkg/cosign/bundle"
-	"github.com/sigstore/cosign/v2/pkg/cosign/pivkey"
-	"github.com/sigstore/cosign/v2/pkg/cosign/pkcs11key"
-	sigs "github.com/sigstore/cosign/v2/pkg/signature"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/options"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/rekor"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/verify"
+	"github.com/sigstore/cosign/v3/pkg/cosign"
+	"github.com/sigstore/cosign/v3/pkg/cosign/bundle"
+	"github.com/sigstore/cosign/v3/pkg/cosign/pivkey"
+	"github.com/sigstore/cosign/v3/pkg/cosign/pkcs11key"
+	sigs "github.com/sigstore/cosign/v3/pkg/signature"
 )
 
 type CreateCmd struct {
@@ -44,14 +44,10 @@ type CreateCmd struct {
 	AttestationPath      string
 	BundlePath           string
 	CertificatePath      string
-	IgnoreTlog           bool
-	KeyRef               string
 	Out                  string
-	RekorURL             string
 	RFC3161TimestampPath string
 	SignaturePath        string
-	Sk                   bool
-	Slot                 string
+	options.CommonBundleCreateOptions
 }
 
 func (c *CreateCmd) Exec(ctx context.Context) (err error) {
@@ -74,6 +70,10 @@ func (c *CreateCmd) Exec(ctx context.Context) (err error) {
 		b, err := cosign.FetchLocalSignedPayloadFromPath(c.BundlePath)
 		if err != nil {
 			return err
+		}
+
+		if c.IgnoreTlog && b.Bundle != nil && len(b.Bundle.SignedEntryTimestamp) > 0 {
+			return fmt.Errorf("cannot ignore transparency log when the provided bundle contains a Signed Entry Timestamp")
 		}
 
 		if b.Cert != "" {
@@ -207,7 +207,7 @@ func (c *CreateCmd) Exec(ctx context.Context) (err error) {
 	}
 
 	if c.Out != "" {
-		err = os.WriteFile(c.Out, bundleBytes, 0600)
+		err = os.WriteFile(c.Out, bundleBytes, 0600) // #nosec G703 -- user-supplied output path is intentional
 		if err != nil {
 			return err
 		}

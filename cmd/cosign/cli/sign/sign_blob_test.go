@@ -15,12 +15,22 @@
 package sign
 
 import (
+	"crypto"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
-	"github.com/sigstore/cosign/v2/pkg/cosign"
+	"github.com/secure-systems-lab/go-securesystemslib/encrypted"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/options"
+	"github.com/sigstore/cosign/v3/internal/test"
+	"github.com/sigstore/cosign/v3/pkg/cosign"
+	"github.com/sigstore/sigstore-go/pkg/root"
 )
 
 func TestSignBlobCmd(t *testing.T) {
@@ -37,7 +47,7 @@ func TestSignBlobCmd(t *testing.T) {
 	keyOpts := options.KeyOpts{KeyRef: keyRef, BundlePath: bundlePath}
 
 	// Test happy path
-	_, err := SignBlobCmd(rootOpts, keyOpts, blobPath, true, "", "", false)
+	_, err := SignBlobCmd(t.Context(), rootOpts, keyOpts, blobPath, "", "", true, "", "", false)
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
@@ -46,17 +56,149 @@ func TestSignBlobCmd(t *testing.T) {
 	keyOpts.NewBundleFormat = true
 	sigPath := filepath.Join(td, "output.sig")
 	certPath := filepath.Join(td, "output.pem")
-	_, err = SignBlobCmd(rootOpts, keyOpts, blobPath, false, sigPath, certPath, false)
+	_, err = SignBlobCmd(t.Context(), rootOpts, keyOpts, blobPath, "", "", false, sigPath, certPath, false)
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
+	}
+
+	// Test signing with a certificate
+	rootCert, rootKey, _ := test.GenerateRootCa()
+	cert, certPrivKey, _ := test.GenerateLeafCert("subject", "oidc-issuer", rootCert, rootKey)
+	certPemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
+	signCertPath := writeFile(t, td, string(certPemBytes), "cert.pem")
+	x509Encoded, err := x509.MarshalPKCS8PrivateKey(certPrivKey)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+	encBytes, err := encrypted.Encrypt(x509Encoded, nil)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{
+		Bytes: encBytes,
+		Type:  cosign.SigstorePrivateKeyPemType,
+	})
+	certPrivKeyRef := writeFile(t, td, string(pemBytes), "certkey.pem")
+	keyOpts.KeyRef = certPrivKeyRef
+
+	_, err = SignBlobCmd(t.Context(), rootOpts, keyOpts, blobPath, signCertPath, "", false, "", "", false)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x509Encoded, err = x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encBytes, err = encrypted.Encrypt(x509Encoded, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pemBytes = pem.EncodeToMemory(&pem.Block{
+		Bytes: encBytes,
+		Type:  cosign.SigstorePrivateKeyPemType,
+	})
+
+	// Test signing using Ed25519 key with custom signing config and no transparency log upload
+	edKeyRef := writeFile(t, td, string(pemBytes), "ed_key.pem")
+	keyOpts = options.KeyOpts{KeyRef: edKeyRef, BundlePath: bundlePath}
+	sc, err := root.NewSigningConfig(
+		root.SigningConfigMediaType02,
+		nil,
+		nil,
+		nil,
+		root.ServiceConfiguration{},
+		nil,
+		root.ServiceConfiguration{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyOpts.SigningConfig = sc
+	sigBytes, err := SignBlobCmd(t.Context(), rootOpts, keyOpts, blobPath, "", "", true, "", "", true)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+	decodedSig, err := base64.StdEncoding.DecodeString(string(sigBytes))
+	if err != nil {
+		t.Fatalf("failed to decode base64 signature: %v", err)
+	}
+	if !ed25519.Verify(pub, blob, decodedSig) {
+		errString := "expected ed25519 signature"
+		if ed25519.VerifyWithOptions(pub, blob, decodedSig, &ed25519.Options{Hash: crypto.SHA512}) == nil {
+			errString += ", received ed25519ph signature"
+		}
+		t.Fatal("signature verification failed: " + errString)
+	}
+
+	// Test signing using Ed25519 key with default signing config and no transparency log upload
+	keyOpts = options.KeyOpts{KeyRef: edKeyRef, BundlePath: bundlePath}
+	sigBytes, err = SignBlobCmd(t.Context(), rootOpts, keyOpts, blobPath, "", "", true, "", "", false)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+	decodedSig, err = base64.StdEncoding.DecodeString(string(sigBytes))
+	if err != nil {
+		t.Fatalf("failed to decode base64 signature: %v", err)
+	}
+	if !ed25519.Verify(pub, blob, decodedSig) {
+		errString := "expected ed25519 signature"
+		if ed25519.VerifyWithOptions(pub, blob, decodedSig, &ed25519.Options{Hash: crypto.SHA512}) == nil {
+			errString += ", received ed25519ph signature"
+		}
+		t.Fatal("signature verification failed: " + errString)
 	}
 }
 
 func writeFile(t *testing.T, td string, blob string, name string) string {
 	// Write blob to disk
 	blobPath := filepath.Join(td, name)
-	if err := os.WriteFile(blobPath, []byte(blob), 0644); err != nil {
+	if err := os.WriteFile(blobPath, []byte(blob), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return blobPath
+}
+
+func TestSignBlobCmd_LegacyBundleNoCert(t *testing.T) {
+	td := t.TempDir()
+	bundlePath := filepath.Join(td, "legacy-bundle.json")
+
+	keys, _ := cosign.GenerateKeyPair(nil)
+	keyRef := writeFile(t, td, string(keys.PrivateBytes), "key.pem")
+
+	blob := []byte("foo")
+	blobPath := writeFile(t, td, string(blob), "foo.txt")
+
+	rootOpts := &options.RootOptions{}
+	keyOpts := options.KeyOpts{
+		KeyRef:          keyRef,
+		BundlePath:      bundlePath,
+		NewBundleFormat: false,
+	}
+
+	_, err := SignBlobCmd(t.Context(), rootOpts, keyOpts, blobPath, "", "", true, "", "", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	bundleBytes, err := os.ReadFile(bundlePath)
+	if err != nil {
+		t.Fatalf("failed to read written bundle file: %v", err)
+	}
+
+	var payload cosign.LocalSignedPayload
+	if err := json.Unmarshal(bundleBytes, &payload); err != nil {
+		t.Fatalf("failed to unmarshal legacy bundle: %v", err)
+	}
+
+	if payload.Cert != "" {
+		t.Fatalf("expected empty cert field in legacy bundle when signing with a key without certificate, got: %q", payload.Cert)
+	}
+	if payload.Base64Signature == "" {
+		t.Fatal("expected non-empty Base64Signature in legacy bundle")
+	}
 }

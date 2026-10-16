@@ -16,7 +16,11 @@ package signingconfig
 
 import (
 	"context"
+	"crypto"
+	"crypto/ed25519"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +29,8 @@ import (
 
 	prototrustroot "github.com/sigstore/protobuf-specs/gen/pb-go/trustroot/v1"
 	"github.com/sigstore/sigstore-go/pkg/root"
+	"github.com/sigstore/sigstore/pkg/signature"
+	"github.com/theupdateframework/go-tuf/v2/metadata"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -165,7 +171,7 @@ func TestCreateCmd(t *testing.T) {
 			}
 			delete(specMap, key)
 
-			var pairs []string
+			pairs := make([]string, 0, len(specMap))
 			for k, v := range specMap {
 				pairs = append(pairs, fmt.Sprintf("%s=%s", k, v))
 			}
@@ -197,10 +203,201 @@ func TestCreateCmd(t *testing.T) {
 		t.Fatal("expected error for missing tsa-config, but got none")
 	}
 	signingConfigCreate.TSAConfig = "ANY" // reset
+
+	// Test RekorV2
+	tufRepo := t.TempDir()
+	err = newTUF(tufRepo, map[string][]byte{
+		"signing_config_rekor_v2.v0.2.json": []byte(`{
+			"mediaType": "application/vnd.dev.sigstore.signingconfig.v0.2+json",
+			"rekorTlogConfig": {"selector": "EXACT", "count": 1},
+			"tsaConfig": {"selector": "ANY"}
+		}`),
+	})
+	checkErr(t, err)
+	tufServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.FileServer(http.Dir(tufRepo)).ServeHTTP(w, r)
+	}))
+	defer tufServer.Close()
+	t.Setenv("TUF_MIRROR", tufServer.URL)
+	t.Setenv("TUF_ROOT_JSON", filepath.Join(tufRepo, "1.root.json"))
+	t.Setenv("TUF_ROOT", t.TempDir())
+	signingConfigCreateRekorV2 := CreateCmd{
+		WithDefaultServices: true,
+		RekorV2:             true,
+		Out:                 filepath.Join(td, "signingconfig_rekor_v2.json"),
+	}
+	err = signingConfigCreateRekorV2.Exec(ctx)
+	checkErr(t, err)
+
+	// Test base-config with override
+	t.Run("base-config with oidc override", func(t *testing.T) {
+		baseConfigPath := filepath.Join(td, "base-config.json")
+		baseCmd := CreateCmd{
+			FulcioSpecs:       []string{fulcioSpec},
+			RekorSpecs:        []string{rekorSpec},
+			OIDCProviderSpecs: []string{oidcSpec},
+			TSASpecs:          []string{tsaSpec},
+			RekorConfig:       "EXACT:1",
+			TSAConfig:         "ANY",
+			Out:               baseConfigPath,
+		}
+		err := baseCmd.Exec(ctx)
+		checkErr(t, err)
+
+		// Create a new config using base-config and override OIDC
+		customOIDCSpec := fmt.Sprintf("url=https://custom-oidc.example.com,api-version=1,operator=custom-op,start-time=%s", startTime)
+		customConfigPath := filepath.Join(td, "custom-config.json")
+		customCmd := CreateCmd{
+			BaseConfig:        baseConfigPath,
+			OIDCProviderSpecs: []string{customOIDCSpec},
+			Out:               customConfigPath,
+		}
+		err = customCmd.Exec(ctx)
+		checkErr(t, err)
+
+		scBytes, err := os.ReadFile(customConfigPath)
+		checkErr(t, err)
+		var sc prototrustroot.SigningConfig
+		err = protojson.Unmarshal(scBytes, &sc)
+		checkErr(t, err)
+
+		if len(sc.GetCaUrls()) != 1 {
+			t.Fatal("expected 1 fulcio service from base config")
+		}
+		if sc.GetCaUrls()[0].GetOperator() != "fulcio-op" {
+			t.Fatalf("unexpected fulcio operator: %s", sc.GetCaUrls()[0].GetOperator())
+		}
+
+		if len(sc.GetRekorTlogUrls()) != 1 {
+			t.Fatal("expected 1 rekor service from base config")
+		}
+		if sc.GetRekorTlogUrls()[0].GetOperator() != "rekor-op" {
+			t.Fatalf("unexpected rekor operator: %s", sc.GetRekorTlogUrls()[0].GetOperator())
+		}
+
+		if len(sc.GetTsaUrls()) != 1 {
+			t.Fatal("expected 1 tsa service from base config")
+		}
+		if sc.GetTsaUrls()[0].GetOperator() != "tsa-op" {
+			t.Fatalf("unexpected tsa operator: %s", sc.GetTsaUrls()[0].GetOperator())
+		}
+
+		if len(sc.GetOidcUrls()) != 1 {
+			t.Fatalf("expected 1 oidc provider, got %d", len(sc.GetOidcUrls()))
+		}
+		if sc.GetOidcUrls()[0].GetOperator() != "custom-op" {
+			t.Fatalf("expected custom oidc provider, got operator: %s", sc.GetOidcUrls()[0].GetOperator())
+		}
+		if sc.GetOidcUrls()[0].GetUrl() != "https://custom-oidc.example.com" {
+			t.Fatalf("expected custom oidc url, got: %s", sc.GetOidcUrls()[0].GetUrl())
+		}
+
+		if sc.GetRekorTlogConfig().GetSelector() != prototrustroot.ServiceSelector_EXACT {
+			t.Fatal("expected rekor config from base")
+		}
+		if sc.GetTsaConfig().GetSelector() != prototrustroot.ServiceSelector_ANY {
+			t.Fatal("expected tsa config from base")
+		}
+	})
 }
 
 func checkErr(t *testing.T, err error) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+func newKey() (*metadata.Key, signature.Signer, error) {
+	pub, private, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	public, err := metadata.KeyFromPublicKey(pub)
+	if err != nil {
+		return nil, nil, err
+	}
+	signer, err := signature.LoadSigner(private, crypto.Hash(0))
+	if err != nil {
+		return nil, nil, err
+	}
+	return public, signer, nil
+}
+
+func newTUF(td string, targetList map[string][]byte) error {
+	expiration := time.Now().AddDate(0, 0, 1).UTC()
+	targets := metadata.Targets(expiration)
+	targetsDir := filepath.Join(td, "targets")
+	err := os.Mkdir(targetsDir, 0700)
+	if err != nil {
+		return err
+	}
+	for name, content := range targetList {
+		targetPath := filepath.Join(targetsDir, name)
+		err := os.WriteFile(targetPath, content, 0600)
+		if err != nil {
+			return err
+		}
+		targetFileInfo, err := metadata.TargetFile().FromFile(targetPath, "sha256")
+		if err != nil {
+			return err
+		}
+		targets.Signed.Targets[name] = targetFileInfo
+	}
+	snapshot := metadata.Snapshot(expiration)
+	timestamp := metadata.Timestamp(expiration)
+	root := metadata.Root(expiration)
+	root.Signed.ConsistentSnapshot = false
+	public, signer, err := newKey()
+	if err != nil {
+		return err
+	}
+	for _, name := range []string{"targets", "snapshot", "timestamp", "root"} {
+		err := root.Signed.AddKey(public, name)
+		if err != nil {
+			return err
+		}
+		switch name {
+		case "targets":
+			_, err = targets.Sign(signer)
+		case "snapshot":
+			_, err = snapshot.Sign(signer)
+		case "timestamp":
+			_, err = timestamp.Sign(signer)
+		case "root":
+			_, err = root.Sign(signer)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	err = targets.ToFile(filepath.Join(td, "targets.json"), false)
+	if err != nil {
+		return err
+	}
+	err = snapshot.ToFile(filepath.Join(td, "snapshot.json"), false)
+	if err != nil {
+		return err
+	}
+	err = timestamp.ToFile(filepath.Join(td, "timestamp.json"), false)
+	if err != nil {
+		return err
+	}
+	err = root.ToFile(filepath.Join(td, "1.root.json"), false)
+	if err != nil {
+		return err
+	}
+	err = root.VerifyDelegate("root", root)
+	if err != nil {
+		return err
+	}
+	err = root.VerifyDelegate("targets", targets)
+	if err != nil {
+		return err
+	}
+	err = root.VerifyDelegate("snapshot", snapshot)
+	if err != nil {
+		return err
+	}
+	err = root.VerifyDelegate("timestamp", timestamp)
+	return err
 }

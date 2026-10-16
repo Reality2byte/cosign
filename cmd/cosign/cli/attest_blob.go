@@ -15,14 +15,12 @@
 package cli
 
 import (
-	"context"
+	"fmt"
 
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/attest"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/generate"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
-	"github.com/sigstore/cosign/v2/internal/ui"
-	"github.com/sigstore/cosign/v2/pkg/cosign"
-	"github.com/sigstore/cosign/v2/pkg/cosign/env"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/attest"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/generate"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/options"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/signcommon"
 	"github.com/spf13/cobra"
 )
 
@@ -31,11 +29,11 @@ func AttestBlob() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "attest-blob",
-		Short: "Attest the supplied blob.",
+		Short: "Attest the supplied blob",
 		Example: `  cosign attest-blob --key <key path>|<kms uri> [--predicate <path>] [--a key=value] [--f] [--r] <BLOB uri>
 
-  # attach an attestation to a blob with a local key pair file and print the attestation
-  cosign attest-blob --predicate <FILE> --type <TYPE> --key cosign.key --output-attestation <path> <BLOB>
+  # attach an attestation to a blob with a local key pair file and write the bundle to a file
+  cosign attest-blob --predicate <FILE> --type <TYPE> --key cosign.key --bundle <path> <BLOB>
 
   # attach an attestation to a blob with a key pair stored in Azure Key Vault
   cosign attest-blob --predicate <FILE> --type <TYPE> --key azurekms://[VAULT_NAME][VAULT_URI]/[KEY] <BLOB>
@@ -53,7 +51,20 @@ func AttestBlob() *cobra.Command {
   echo <PAYLOAD> | cosign attest-blob --predicate - --yes`,
 
 		PersistentPreRun: options.BindViper,
+		PreRunE: func(_ *cobra.Command, _ []string) error {
+			if o.NewBundleFormat && o.BundlePath == "" {
+				return fmt.Errorf("must specify --bundle with --new-bundle-format")
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := signcommon.ValidateSigningOptions(cmd.Context(), o.UseSigningConfig, o.SigningConfigPath,
+				o.Rekor.URL, o.Fulcio.URL, o.OIDC.Issuer, o.TSAServerURL,
+				o.TlogUpload, o.NewBundleFormat, o.BundlePath,
+				"", o.OutputAttestation, o.OutputCertificate, "", o.OutputSignature, o.RFC3161TimestampPath); err != nil {
+				return err
+			}
+
 			if o.Predicate.Statement == "" && len(args) != 1 {
 				return cobra.ExactArgs(1)(cmd, args)
 			}
@@ -63,37 +74,35 @@ func AttestBlob() *cobra.Command {
 			}
 
 			ko := options.KeyOpts{
-				KeyRef:                   o.Key,
-				PassFunc:                 generate.GetPass,
-				Sk:                       o.SecurityKey.Use,
-				Slot:                     o.SecurityKey.Slot,
-				FulcioURL:                o.Fulcio.URL,
-				IDToken:                  o.Fulcio.IdentityToken,
-				FulcioAuthFlow:           o.Fulcio.AuthFlow,
-				InsecureSkipFulcioVerify: o.Fulcio.InsecureSkipFulcioVerify,
-				RekorURL:                 o.Rekor.URL,
-				OIDCIssuer:               o.OIDC.Issuer,
-				OIDCClientID:             o.OIDC.ClientID,
-				OIDCClientSecret:         oidcClientSecret,
-				OIDCRedirectURL:          o.OIDC.RedirectURL,
-				OIDCProvider:             o.OIDC.Provider,
-				SkipConfirmation:         o.SkipConfirmation,
-				TSAClientCACert:          o.TSAClientCACert,
-				TSAClientKey:             o.TSAClientKey,
-				TSAClientCert:            o.TSAClientCert,
-				TSAServerName:            o.TSAServerName,
-				TSAServerURL:             o.TSAServerURL,
-				RFC3161TimestampPath:     o.RFC3161TimestampPath,
-				BundlePath:               o.BundlePath,
-				NewBundleFormat:          o.NewBundleFormat,
+				KeyRef:                         o.Key,
+				PassFunc:                       generate.GetPass,
+				Sk:                             o.SecurityKey.Use,
+				Slot:                           o.SecurityKey.Slot,
+				FulcioURL:                      o.Fulcio.URL,
+				IDToken:                        o.Fulcio.IdentityToken,
+				FulcioAuthFlow:                 o.Fulcio.AuthFlow,
+				RekorURL:                       o.Rekor.URL,
+				OIDCIssuer:                     o.OIDC.Issuer,
+				OIDCClientID:                   o.OIDC.ClientID,
+				OIDCClientSecret:               oidcClientSecret,
+				OIDCRedirectURL:                o.OIDC.RedirectURL,
+				OIDCDisableProviders:           o.OIDC.DisableAmbientProviders,
+				OIDCProvider:                   o.OIDC.Provider,
+				SkipConfirmation:               o.SkipConfirmation,
+				TSAClientCACert:                o.TSAClientCACert,
+				TSAClientKey:                   o.TSAClientKey,
+				TSAClientCert:                  o.TSAClientCert,
+				TSAServerName:                  o.TSAServerName,
+				TSAServerURL:                   o.TSAServerURL,
+				RFC3161TimestampPath:           o.RFC3161TimestampPath,
+				IssueCertificateForExistingKey: o.IssueCertificate,
+				BundlePath:                     o.BundlePath,
+				NewBundleFormat:                o.NewBundleFormat,
 			}
-			if o.Key == "" && env.Getenv(env.VariableSigstoreCTLogPublicKeyFile) == "" { // Get the trusted root if using fulcio for signing
-				trustedMaterial, err := cosign.TrustedRoot()
-				if err != nil {
-					ui.Warnf(context.Background(), "Could not fetch trusted_root.json from the TUF repository. Continuing with individual targets. Error from TUF: %v", err)
-				}
-				ko.TrustedMaterial = trustedMaterial
+			if err := signcommon.LoadSigningConfigAndTrustedMaterial(cmd.Context(), &ko, o.UseSigningConfig, o.SigningConfigPath, o.TrustedRootPath); err != nil {
+				return err
 			}
+
 			v := attest.AttestBlobCommand{
 				KeyOpts:           ko,
 				CertPath:          o.Cert,

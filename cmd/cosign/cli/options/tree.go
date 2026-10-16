@@ -29,6 +29,7 @@ func (c *TreeOptions) AddFlags(cmd *cobra.Command) {
 	c.Registry.AddFlags(cmd)
 	c.RegistryExperimental.AddFlags(cmd)
 
-	cmd.Flags().BoolVar(&c.ExperimentalOCI11, "experimental-oci11", false,
-		"set to true to enable experimental OCI 1.1 behaviour")
+	cmd.Flags().BoolVar(&c.ExperimentalOCI11, "experimental-oci11", true,
+		"set to false to ignore OCI 1.1 behavior")
+	_ = cmd.Flags().MarkDeprecated("experimental-oci11", "OCI referrers will be the default behavior in future versions")
 }

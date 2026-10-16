@@ -19,8 +19,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/download"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/download"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/options"
 	"github.com/spf13/cobra"
 )
 
@@ -49,7 +49,7 @@ func downloadSignature() *cobra.Command {
 		Args:             cobra.ExactArgs(1),
 		PersistentPreRun: options.BindViper,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return download.SignatureCmd(cmd.Context(), *o, args[0])
+			return download.SignatureCmd(cmd.Context(), *o, args[0], cmd.OutOrStdout())
 		},
 	}
 
@@ -94,7 +94,7 @@ func downloadAttestation() *cobra.Command {
 		Args:             cobra.ExactArgs(1),
 		PersistentPreRun: options.BindViper,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return download.AttestationCmd(cmd.Context(), *o, *ao, args[0])
+			return download.AttestationCmd(cmd.Context(), *o, *ao, args[0], cmd.OutOrStdout())
 		},
 	}
 

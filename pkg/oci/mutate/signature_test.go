@@ -21,9 +21,9 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-containerregistry/pkg/v1/types"
-	"github.com/sigstore/cosign/v2/pkg/cosign/bundle"
-	"github.com/sigstore/cosign/v2/pkg/oci"
-	"github.com/sigstore/cosign/v2/pkg/oci/static"
+	"github.com/sigstore/cosign/v3/pkg/cosign/bundle"
+	"github.com/sigstore/cosign/v3/pkg/oci"
+	"github.com/sigstore/cosign/v3/pkg/oci/static"
 )
 
 var (
@@ -444,4 +444,16 @@ func TestSignatureWithEverythingTSA(t *testing.T) {
 	}
 
 	assertSignaturesEqual(t, expectedSig, newSig)
+}
+
+func TestSignatureWithEmptyCertChain(t *testing.T) {
+	payload := "this is the TestSignatureWithEmptyCertChain content!"
+	b64sig := "b64 content=="
+	originalSig := mustCreateSignature(t, []byte(payload), b64sig)
+
+	// An empty or whitespace-only certificate PEM loads to zero certs without
+	// error; the signer must return an error instead of panicking on certs[0].
+	if _, err := Signature(originalSig, WithCertChain([]byte(" \n"), nil)); err == nil {
+		t.Error("Signature(WithCertChain(emptyCert)) returned nil error, want error")
+	}
 }

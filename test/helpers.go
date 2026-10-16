@@ -36,7 +36,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"testing"
 	"time"
@@ -52,18 +51,22 @@ import (
 	// Initialize all known client auth plugins
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
-	cliverify "github.com/sigstore/cosign/v2/cmd/cosign/cli/verify"
-	"github.com/sigstore/cosign/v2/pkg/cosign"
-	"github.com/sigstore/cosign/v2/pkg/cosign/env"
-	ociremote "github.com/sigstore/cosign/v2/pkg/oci/remote"
-	sigs "github.com/sigstore/cosign/v2/pkg/signature"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/options"
+	cliverify "github.com/sigstore/cosign/v3/cmd/cosign/cli/verify"
+	"github.com/sigstore/cosign/v3/pkg/cosign"
+	"github.com/sigstore/cosign/v3/pkg/cosign/env"
+	ociremote "github.com/sigstore/cosign/v3/pkg/oci/remote"
+	sigs "github.com/sigstore/cosign/v3/pkg/signature"
+	v1 "github.com/sigstore/protobuf-specs/gen/pb-go/common/v1"
+	"github.com/sigstore/sigstore/pkg/signature"
 )
 
 const (
-	rekorURL  = "http://127.0.0.1:3000"
-	fulcioURL = "http://127.0.0.1:5555"
-	certID    = "foo@bar.com"
+	rekorURL   = "http://127.0.0.1:3000"
+	rekorV2URL = "http://127.0.0.1:3003"
+	fulcioURL  = "http://127.0.0.1:5555"
+	tsaURL     = "http://127.0.0.1:3004"
+	certID     = "foo@bar.com"
 )
 
 var keyPass = []byte("hello")
@@ -121,10 +124,8 @@ var verifyCertBundle = func(keyRef, caCertFile, caIntermediateCertFile, imageRef
 		MaxWorkers:    10,
 		IgnoreTlog:    skipTlogVerify,
 		CertVerifyOptions: options.CertVerifyOptions{
-			CAIntermediates:      caIntermediateCertFile,
-			CARoots:              caCertFile,
-			CertOidcIssuerRegexp: ".*",
-			CertIdentityRegexp:   ".*",
+			CAIntermediates: caIntermediateCertFile,
+			CARoots:         caCertFile,
 		},
 	}
 
@@ -151,12 +152,13 @@ var verifyTSA = func(keyRef, imageRef string, checkClaims bool, annotations map[
 	return cmd.Exec(context.Background(), args)
 }
 
-var verifyKeylessTSA = func(imageRef string, tsaCertChain string, skipSCT bool, skipTlogVerify bool) error { //nolint: unused
+var verifyKeylessTSA = func(imageRef, tsaCertChain, certChain string, skipSCT, skipTlogVerify bool) error { //nolint: unused
 	cmd := cliverify.VerifyCommand{
 		CertVerifyOptions: options.CertVerifyOptions{
 			CertOidcIssuerRegexp: ".*",
 			CertIdentityRegexp:   ".*",
 		},
+		CertChain:        certChain,
 		RekorURL:         rekorURL,
 		HashAlgorithm:    crypto.SHA256,
 		TSACertChainPath: tsaCertChain,
@@ -256,7 +258,11 @@ var verifyOffline = func(keyRef, imageRef string, checkClaims bool, annotations 
 
 var ro = &options.RootOptions{Timeout: options.DefaultTimeout}
 
-func keypair(t *testing.T, td string) (*cosign.KeysBytes, string, string) {
+func keypairWithAlgorithm(t *testing.T, td string, publicKeyDetails v1.PublicKeyDetails) (*cosign.KeysBytes, string, string) {
+	algo, err := signature.GetAlgorithmDetails(publicKeyDetails)
+	if err != nil {
+		t.Fatal(err)
+	}
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -267,7 +273,7 @@ func keypair(t *testing.T, td string) (*cosign.KeysBytes, string, string) {
 	defer func() {
 		_ = os.Chdir(wd)
 	}()
-	keys, err := cosign.GenerateKeyPair(passFunc)
+	keys, err := cosign.GenerateKeyPairWithAlgorithm(&algo, passFunc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,6 +288,10 @@ func keypair(t *testing.T, td string) (*cosign.KeysBytes, string, string) {
 		t.Fatal(err)
 	}
 	return keys, privKeyPath, pubKeyPath
+}
+
+func keypair(t *testing.T, td string) (*cosign.KeysBytes, string, string) {
+	return keypairWithAlgorithm(t, td, v1.PublicKeyDetails_PKIX_ECDSA_P256_SHA_256)
 }
 
 // convert the given ecdsa.PrivateKey to a PEM encoded string, import into sigstore format,
@@ -502,13 +512,9 @@ func registryClientOpts(ctx context.Context) []remote.Option {
 
 // setLocalEnv sets SIGSTORE_CT_LOG_PUBLIC_KEY_FILE, SIGSTORE_ROOT_FILE, and SIGSTORE_REKOR_PUBLIC_KEY for the locally running sigstore deployment.
 func setLocalEnv(t *testing.T, dir string) error {
-	// fulcio repo is downloaded to the user's home directory by e2e_test.sh
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("error getting home directory: %w", err)
-	}
-	t.Setenv(env.VariableSigstoreCTLogPublicKeyFile.String(), path.Join(home, "fulcio/config/ctfe/pubkey.pem"))
-	err = downloadAndSetEnv(t, fulcioURL+"/api/v1/rootCert", env.VariableSigstoreRootFile.String(), dir)
+	ctLogKey := os.Getenv("CT_LOG_KEY") //nolint: forbidigo
+	t.Setenv(env.VariableSigstoreCTLogPublicKeyFile.String(), ctLogKey)
+	err := downloadAndSetEnv(t, fulcioURL+"/api/v1/rootCert", env.VariableSigstoreRootFile.String(), dir)
 	if err != nil {
 		return fmt.Errorf("error setting %s env var: %w", env.VariableSigstoreRootFile.String(), err)
 	}
@@ -521,7 +527,7 @@ func setLocalEnv(t *testing.T, dir string) error {
 
 // copyFile copies a file from a source to a destination.
 func copyFile(src, dst string) error {
-	f, err := os.Open(src)
+	f, err := os.Open(src) //nolint: gosec
 	if err != nil {
 		return fmt.Errorf("error opening source file: %w", err)
 	}

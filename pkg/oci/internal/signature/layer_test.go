@@ -28,7 +28,7 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/random"
 	"github.com/google/go-containerregistry/pkg/v1/types"
-	"github.com/sigstore/cosign/v2/pkg/cosign/bundle"
+	"github.com/sigstore/cosign/v3/pkg/cosign/bundle"
 )
 
 func mustDecode(s string) []byte {
@@ -126,6 +126,19 @@ func TestSignature(t *testing.T) {
 		},
 		wantSig:     "blah",
 		wantCertErr: errors.New(`error during PEM decoding`),
+	}, {
+		name: "min plus empty cert",
+		l: &sigLayer{
+			Layer: layer,
+			desc: v1.Descriptor{
+				Digest: digest,
+				Annotations: map[string]string{
+					sigkey:  "blah",
+					certkey: " ",
+				},
+			},
+		},
+		wantSig: "blah",
 	}, {
 		name: "min plus bad chain",
 		l: &sigLayer{

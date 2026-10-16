@@ -21,7 +21,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/sigstore/cosign/v2/pkg/cosign/env"
+	"github.com/sigstore/cosign/v3/pkg/cosign/env"
 	"github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/sigstore/sigstore-go/pkg/tuf"
 )
@@ -36,6 +36,34 @@ func TrustedRoot() (root.TrustedMaterial, error) {
 		return nil, fmt.Errorf("error getting live trusted root: %w", err)
 	}
 	return tr, nil
+}
+
+func SigningConfig() (*root.SigningConfig, error) {
+	opts, err := setTUFOpts()
+	if err != nil {
+		return nil, fmt.Errorf("error setting TUF options: %w", err)
+	}
+	sc, err := root.FetchSigningConfigWithOptions(opts)
+	if err != nil {
+		return nil, fmt.Errorf("error getting signing config from TUF: %w", err)
+	}
+	return sc, nil
+}
+
+func SigningConfigRekorV2() (*root.SigningConfig, error) {
+	opts, err := setTUFOpts()
+	if err != nil {
+		return nil, fmt.Errorf("error setting TUF options: %w", err)
+	}
+	client, err := tuf.New(opts)
+	if err != nil {
+		return nil, fmt.Errorf("error creating TUF client: %w", err)
+	}
+	jsonBytes, err := client.GetTarget("signing_config_rekor_v2.v0.2.json")
+	if err != nil {
+		return nil, fmt.Errorf("error getting signing config from TUF: %w", err)
+	}
+	return root.NewSigningConfigFromJSON(jsonBytes)
 }
 
 // setTUFOpts sets the TUF cache directory, the mirror URL, and the root.json in the TUF options.

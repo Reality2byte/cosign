@@ -1,4 +1,4 @@
-// Copyright 2023 the Sigstore Authors.
+// Copyright 2023 The Sigstore Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ import (
 	"strings"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/sigstore/cosign/v2/pkg/oci"
+	"github.com/sigstore/cosign/v3/pkg/oci"
 )
 
 type List []struct {
@@ -28,7 +28,7 @@ type List []struct {
 }
 
 func (pl *List) String() string {
-	r := []string{}
+	r := make([]string, 0, len(*pl))
 	for _, p := range *pl {
 		r = append(r, p.Platform.String())
 	}

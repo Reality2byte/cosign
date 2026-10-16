@@ -20,7 +20,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	"github.com/sigstore/cosign/v2/pkg/signature"
+	"github.com/sigstore/cosign/v3/pkg/signature"
 )
 
 func TestAnnotationOptions_AnnotationsMap(t *testing.T) {
@@ -37,6 +37,22 @@ func TestAnnotationOptions_AnnotationsMap(t *testing.T) {
 		want: signature.AnnotationsMap{
 			Annotations: map[string]interface{}{
 				"key": "value",
+			},
+		},
+	}, {
+		name:        "value containing equals sign",
+		annotations: []string{"key=a=b"},
+		want: signature.AnnotationsMap{
+			Annotations: map[string]interface{}{
+				"key": "a=b",
+			},
+		},
+	}, {
+		name:        "base64 value with padding",
+		annotations: []string{"sig=aGVsbG8="},
+		want: signature.AnnotationsMap{
+			Annotations: map[string]interface{}{
+				"sig": "aGVsbG8=",
 			},
 		},
 	}, {

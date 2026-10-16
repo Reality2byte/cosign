@@ -25,13 +25,13 @@ Cosign supports:
 
 `Cosign` is developed as part of the [`sigstore`](https://sigstore.dev) project.
 We also use a [slack channel](https://sigstore.slack.com)!
-Click [here](https://join.slack.com/t/sigstore/shared_invite/zt-mhs55zh0-XmY3bcfWn4XEyMqUUutbUQ) for the invite link.
+Click [here](https://join.slack.com/t/sigstore/shared_invite/zt-47srvpyn6-j8Ek5hGBwKN32IjLw8BvYA) for the invite link.
 
 ## Installation
 
 For Homebrew, Arch, Nix, GitHub Action, and Kubernetes installs see the [installation docs](https://docs.sigstore.dev/cosign/system_config/installation/).
 
-For Linux and macOS binaries see the [GitHub release assets](https://github.com/sigstore/cosign/releases/latest).
+For Linux, macOS and Windows binaries, see the [GitHub release assets](https://github.com/sigstore/cosign/releases/latest).
 
 :rotating_light: If you are downloading releases of cosign from our GCS bucket - please see more information on the July 31, 2023 [deprecation notice](https://blog.sigstore.dev/cosign-releases-bucket-deprecation/) :rotating_light:
 
@@ -68,7 +68,7 @@ Here is how to install and use cosign inside a Dockerfile through the ghcr.io/si
 ```shell
 FROM ghcr.io/sigstore/cosign/cosign:v2.4.1 as cosign-bin
 
-# Source: https://github.com/chainguard-images/static
+# Source: https://github.com/chainguard-images/images/tree/main/images/static
 FROM cgr.dev/chainguard/static:latest
 COPY --from=cosign-bin /ko-app/cosign /usr/local/bin/cosign
 ENTRYPOINT [ "cosign" ]
@@ -79,6 +79,7 @@ ENTRYPOINT [ "cosign" ]
 This shows how to:
 * sign a container image with the default identity-based "keyless signing" method (see [the documentation for more information](https://docs.sigstore.dev/cosign/signing/overview/))
 * verify the container image
+* explore broader keyless blob signing/verification flows in the [Sigstore Cosign Quickstart](https://docs.sigstore.dev/quickstart/quickstart-cosign/)
 
 ### Sign a container and store the signature in the registry
 
@@ -141,6 +142,14 @@ The following checks were performed on these signatures:
 
 ### Verify a container in an air-gapped environment
 
+**Note:** This section is out of date.
+
+**Note:** Most verification workflows require periodically requesting service keys from a TUF repository.
+For airgapped verification of signatures using the public-good instance, you will need to retrieve the
+[trusted root](https://github.com/sigstore/root-signing/blob/main/targets/trusted_root.json) file from the production
+TUF repository. The contents of this file will change without notification. By not using TUF, you will need
+to build your own mechanism to keep your airgapped copy of this file up-to-date.
+
 Cosign can do completely offline verification by verifying a [bundle](./specs/SIGNATURE_SPEC.md#properties) which is typically distributed as an annotation on the image manifest.
 As long as this annotation is present, then offline verification can be done.
 This bundle annotation is always included by default for keyless signing, so the default `cosign sign` functionality will include all materials needed for offline verification.
@@ -156,8 +165,14 @@ cosign save $IMAGE_NAME --dir ./path/to/dir
 
 Now, in an air-gapped environment, this local image can be verified:
 
-```
-cosign verify --certificate-identity $CERT_IDENTITY --certificate-oidc-issuer $CERT_OIDC_ISSUER --offline --local-image ./path/to/dir
+```shell
+cosign verify \
+  --certificate-identity $CERT_IDENTITY \
+  --certificate-oidc-issuer $CERT_OIDC_ISSUER \
+  --offline=true \
+  --new-bundle-format=false \ # for artifacts signed without the new protobuf bundle format
+  --trusted-root ~/.sigstore/root/tuf-repo-cdn.sigstore.dev/targets/trusted_root.json \ # default location of trusted root
+  --local-image ./path/to/dir
 ```
 
 You'll need to pass in expected values for `$CERT_IDENTITY` and `$CERT_OIDC_ISSUER` to correctly verify this image.
@@ -167,21 +182,34 @@ If you signed with a keypair, the same command will work, assuming the public ke
 cosign verify --key cosign.pub --offline --local-image ./path/to/dir
 ```
 
-### What ** is not ** production ready?
+### Identity-based blob signing and verification
 
-While parts of `cosign` are stable, we are continuing to experiment and add new features.
-The following feature set is not considered stable yet, but we are committed to stabilizing it over time!
+Use keyless blob signing (`cosign sign-blob` without `--key`) and verify against the expected signer identity:
 
-#### Formats/Specifications
+```shell
+$ cosign sign-blob artifact --bundle artifact.sigstore.json --yes
+$ cosign verify-blob artifact \
+  --bundle artifact.sigstore.json \
+  --certificate-identity "https://github.com/ORG/REPO/.github/workflows/release.yml@refs/heads/main" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+```
 
-While the `cosign` code for uploading, signing, retrieving, and verifying several artifact types is stable,
-the format specifications for some of those types may not be considered stable yet.
-Some of these are developed outside of the `cosign` project, so we are waiting for them to stabilize first.
+### Troubleshooting
 
-These include:
+If you encounter issues with Cosign, first make sure you are using a recent release: The Cosign project actively supports the most recent release as well as the last release in the v2 series.
 
-* The SBOM specification for storing SBOMs in a container registry
-* The In-Toto attestation format
+#### Common issues and remedies
+
+1. Verification fails with `failed to verify timestamps: threshold not met for verified log entry integrated timestamps: 0 < 1`: You may be verifying a signature that requires RFC3161 timestamp support
+   * Upgrade to most recent Cosign or
+   * With Cosign 2.6.x, use `--use-signed-timestamps`
+1. Verification fails with `no signatures found`: You may be verifying an image signature that requires support for Rekor v2 transparency log
+   * Upgrade to most recent Cosign
+1. Signing fails with HTTP errors: Signing with Cosign depends on multiple Sigstore services. Retrying on failure may be a useful workaround if any of these services fail -- filing issues for specific failures is also appreciated
+
+#### My problem is something else
+
+Please open an [issue](https://github.com/sigstore/cosign/issues/new/choose) or ask in the [slack channel](#info).
 
 ## Working with Other Artifacts
 
@@ -392,7 +420,7 @@ That looks like:
 **Note:** This can be generated for an image reference using `cosign generate $IMAGE_URI_DIGEST`.
 
 I'm happy to switch this format to something else if it makes sense.
-See https://github.com/notaryproject/nv2/issues/40 for one option.
+See https://github.com/notaryproject/notation/issues/40 for one option.
 
 #### Registry Details
 
@@ -491,6 +519,8 @@ The proposed mechanism is flexible enough to support signing arbitrary things.
 
 `cosign` supports using a KMS provider to generate and sign keys.
 Right now cosign supports Hashicorp Vault, AWS KMS, GCP KMS, Azure Key Vault and we are hoping to support more in the future!
+
+Additional KMS providers are available as external plugins, such as [OVHcloud KMS](https://github.com/ovh/sigstore-kms-ovhcloud).
 
 See the [KMS docs](https://docs.sigstore.dev/cosign/key_management/overview/) for more details.
 
@@ -761,8 +791,6 @@ will be released when there are breaking features.
 Should you discover any security issues, please refer to sigstore's [security
 process](https://github.com/sigstore/.github/blob/main/SECURITY.md)
 
-## PEM files in GitHub Release Assets
+## Bundle files in GitHub Release Assets
 
-The GitHub release assets for cosign contain a PEM file produced by [GoReleaser](https://github.com/sigstore/cosign/blob/ac999344eb381ae91455b0a9c5c267e747608d76/.goreleaser.yml#L166) while signing the cosign blob that is used to verify the integrity of the release binaries. This file is not used by cosign itself, but is provided for users who wish to verify the integrity of the release binaries.
-
-By default, cosign output these PEM files in [base64 encoded format](https://github.com/sigstore/cosign/blob/main/doc/cosign_sign-blob.md#options), this approach might be good for air-gapped environments where the PEM file is stored in a file system. So, you should decode these PEM files before using them to verify the blobs.
+The GitHub release assets for `cosign` contain Sigstore bundle files produced by [GoReleaser](https://github.com/sigstore/cosign/blob/ac999344eb381ae91455b0a9c5c267e747608d76/.goreleaser.yml#L166) while signing the cosign blob that is used to verify the integrity of the release binaries. This file is not used by cosign itself, but is provided for users who wish to [verify the integrity of the release binaries](https://docs.sigstore.dev/cosign/system_config/installation/#verifying-cosign-with-artifact-key).

@@ -1,4 +1,5 @@
 # Binaries for programs and plugins
+.DS_Store
 .DS_STORE
 *.exe
 *.exe~
@@ -27,7 +28,7 @@
 bin*
 dist/
 cosignImagerefs
-bundle
+/bundle
 signature
 certificate
 sigstore-conformance

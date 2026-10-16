@@ -39,13 +39,18 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+
+      - name: Extract version of Go to use
+        run: echo "GOVERSION=$(awk -F'[:@]' '/FROM golang/{print $2; exit}' Dockerfile)" >> $GITHUB_ENV
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: 'go.mod'
+          go-version: '${{ env.GOVERSION }}'
           check-latest: true
+          cache: false
 
       - name: Run cross platform e2e tests
         run: go test -tags=e2e,cross -v ./test/...
@@ -54,13 +59,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+
+      - name: Extract version of Go to use
+        run: echo "GOVERSION=$(awk -F'[:@]' '/FROM golang/{print $2; exit}' Dockerfile)" >> $GITHUB_ENV
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: 'go.mod'
+          go-version: '${{ env.GOVERSION }}'
           check-latest: true
+          cache: false
 
       - name: Run pkcs11 end-to-end tests
         shell: bash
@@ -74,6 +84,7 @@ jobs:
         env:
           VAULT_DEV_ROOT_TOKEN_ID: root
         options: >-
+          --cap-add=IPC_LOCK
           --health-cmd "VAULT_ADDR=http://127.0.0.1:8200 vault status"
           --health-interval 1s
           --health-timeout 5s
@@ -89,19 +100,23 @@ jobs:
       SCAFFOLDING_RELEASE_VERSION: "v0.7.24"
     steps:
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: setup vault
-        uses: cpanato/vault-installer@e7c1d664fa15219e89e43739e39a9df11ba00849 # v1.2.0
+        uses: cpanato/vault-installer@fe568170412f5d81202ec528148f05176efbecc1 # v1.4.0
 
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+      - name: Extract version of Go to use
+        run: echo "GOVERSION=$(awk -F'[:@]' '/FROM golang/{print $2; exit}' Dockerfile)" >> $GITHUB_ENV
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: 'go.mod'
+          go-version: '${{ env.GOVERSION }}'
           check-latest: true
+          cache: false
 
-      - uses: imjasonh/setup-crane@31b88efe9de28ae0ffa220711af4b60be9435f6e # v0.4
+      - uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
 
       - name: Install cluster + sigstore
         uses: sigstore/scaffolding/actions/setup@main
@@ -121,16 +136,21 @@ jobs:
       SCAFFOLDING_RELEASE_VERSION: "v0.7.24"
 
     steps:
-    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
-    - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+
+    - name: Extract version of Go to use
+      run: echo "GOVERSION=$(awk -F'[:@]' '/FROM golang/{print $2; exit}' Dockerfile)" >> $GITHUB_ENV
+
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
-        go-version-file: 'go.mod'
+        go-version: '${{ env.GOVERSION }}'
         check-latest: true
+        cache: false
 
     - name: Setup mirror
-      uses: chainguard-dev/actions/setup-mirror@main
+      uses: chainguard-dev/actions/setup-mirror@84b1be4c638f12d4256ddddef17af98853b6d0d9 # v1.6.40
       with:
         mirror: mirror.gcr.io
 
@@ -167,6 +187,7 @@ jobs:
       run: go test -tags=e2e,registry -v ./test/...
       env:
         COSIGN_TEST_REPO: insecure-registry.notlocal:5001
+        TUF_ROOT_JSON: ${{ github.workspace }}/root.json
 
     - name: Setup local insecure OCI 1.1 registry
       run: |
@@ -217,7 +238,24 @@ jobs:
       env:
         OCI11: yes
         COSIGN_TEST_REPO: insecure-oci-registry.notlocal:5002
+        TUF_ROOT_JSON: ${{ github.workspace }}/root.json
+
+    - name: Set up local HTTP registry
+      run: |
+        docker run -d --restart=always \
+          --name $HTTP_REGISTRY_NAME \
+          -p $HTTP_REGISTRY_PORT:5000 registry:2.8.1
+        sudo echo "127.0.0.1 $HTTP_REGISTRY_NAME" | sudo tee -a /etc/hosts
+      env:
+        HTTP_REGISTRY_NAME: http-registry.notlocal
+        HTTP_REGISTRY_PORT: 5003
+
+    - name: Run HTTP registry tests
+      run: go test -tags=e2e,registry -v ./test/...
+      env:
+        COSIGN_TEST_REPO: http-registry.notlocal:5003
+        TUF_ROOT_JSON: ${{ github.workspace }}/root.json
 
     - name: Collect diagnostics
       if: ${{ failure() }}
-      uses: chainguard-dev/actions/kind-diag@708219d4822f33611ac1a2653815cc10e1ab54a6 # v1.4.7
+      uses: chainguard-dev/actions/kind-diag@84b1be4c638f12d4256ddddef17af98853b6d0d9 # v1.6.40

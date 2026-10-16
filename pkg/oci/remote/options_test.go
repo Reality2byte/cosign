@@ -25,6 +25,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	sgbundle "github.com/sigstore/sigstore-go/pkg/bundle"
 )
 
 func TestOptions(t *testing.T) {
@@ -120,6 +121,17 @@ func TestOptions(t *testing.T) {
 			TargetRepository:  repo,
 			ROpt:              append(append([]remote.Option{}, otherROpt...), moreROpt...),
 		},
+	}, {
+		name: "bundle options option",
+		opts: []Option{WithBundleOptions(sgbundle.AllowCertificateChain())},
+		want: &options{
+			SignatureSuffix:   SignatureTagSuffix,
+			AttestationSuffix: AttestationTagSuffix,
+			SBOMSuffix:        SBOMTagSuffix,
+			TargetRepository:  repo,
+			ROpt:              defaultOptions,
+			BundleOpts:        []sgbundle.Option{sgbundle.AllowCertificateChain()},
+		},
 	}}
 
 	for _, test := range tests {
@@ -161,6 +173,12 @@ func TestGetEnvTargetRepository(t *testing.T) {
 
 			envVal: "",
 			want:   name.Repository{},
+		},
+		{
+			desc: "registry without repository path",
+
+			envVal:  "registry.example.com:5000",
+			wantErr: errors.New(`parsing $COSIGN_REPOSITORY: "registry.example.com:5000" looks like a registry, but COSIGN_REPOSITORY must be a full repository (registry plus path), e.g. "registry.example.com:5000/my-repo": repository can only contain the characters ` + "`abcdefghijklmnopqrstuvwxyz0123456789_-./`" + `: registry.example.com:5000`),
 		},
 	}
 
@@ -216,6 +234,9 @@ func optionsEqual(o1, o2 *options) bool {
 		return false
 	}
 	if !slicesEqual(o1.OriginalOptions, o2.OriginalOptions) {
+		return false
+	}
+	if len(o1.BundleOpts) != len(o2.BundleOpts) {
 		return false
 	}
 	return true

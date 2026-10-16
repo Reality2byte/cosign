@@ -21,12 +21,12 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/sigstore/cosign/v2/pkg/blob"
-	"github.com/sigstore/cosign/v2/pkg/cosign"
-	"github.com/sigstore/cosign/v2/pkg/cosign/git"
-	"github.com/sigstore/cosign/v2/pkg/cosign/git/gitlab"
-	"github.com/sigstore/cosign/v2/pkg/cosign/kubernetes"
-	"github.com/sigstore/cosign/v2/pkg/cosign/pkcs11key"
+	"github.com/sigstore/cosign/v3/pkg/blob"
+	"github.com/sigstore/cosign/v3/pkg/cosign"
+	"github.com/sigstore/cosign/v3/pkg/cosign/git"
+	"github.com/sigstore/cosign/v3/pkg/cosign/git/gitlab"
+	"github.com/sigstore/cosign/v3/pkg/cosign/kubernetes"
+	"github.com/sigstore/cosign/v3/pkg/cosign/pkcs11key"
 	"github.com/sigstore/sigstore/pkg/cryptoutils"
 	"github.com/sigstore/sigstore/pkg/signature"
 
@@ -69,10 +69,13 @@ func VerifierForKeyRef(ctx context.Context, keyRef string, hashAlgorithm crypto.
 		return nil, fmt.Errorf("pem to public key: %w", err)
 	}
 
+	if hashAlgorithm == 0 {
+		return signature.LoadDefaultVerifier(pubKey)
+	}
 	return signature.LoadVerifier(pubKey, hashAlgorithm)
 }
 
-func loadKey(keyPath string, pf cosign.PassFunc) (signature.SignerVerifier, error) {
+func loadKey(keyPath string, pf cosign.PassFunc, defaultLoadOptions *[]signature.LoadOption) (signature.SignerVerifier, error) {
 	kb, err := blob.LoadFileOrURL(keyPath)
 	if err != nil {
 		return nil, err
@@ -84,7 +87,7 @@ func loadKey(keyPath string, pf cosign.PassFunc) (signature.SignerVerifier, erro
 			return nil, err
 		}
 	}
-	return cosign.LoadPrivateKey(kb, pass)
+	return cosign.LoadPrivateKey(kb, pass, defaultLoadOptions)
 }
 
 // LoadPublicKeyRaw loads a verifier from a PEM-encoded public key
@@ -93,14 +96,17 @@ func LoadPublicKeyRaw(raw []byte, hashAlgorithm crypto.Hash) (signature.Verifier
 	if err != nil {
 		return nil, err
 	}
+	if hashAlgorithm == 0 {
+		return signature.LoadDefaultVerifier(pub)
+	}
 	return signature.LoadVerifier(pub, hashAlgorithm)
 }
 
 func SignerFromKeyRef(ctx context.Context, keyRef string, pf cosign.PassFunc) (signature.Signer, error) {
-	return SignerVerifierFromKeyRef(ctx, keyRef, pf)
+	return SignerVerifierFromKeyRef(ctx, keyRef, pf, nil)
 }
 
-func SignerVerifierFromKeyRef(ctx context.Context, keyRef string, pf cosign.PassFunc) (signature.SignerVerifier, error) {
+func SignerVerifierFromKeyRef(ctx context.Context, keyRef string, pf cosign.PassFunc, defaultLoadOptions *[]signature.LoadOption) (signature.SignerVerifier, error) {
 	switch {
 	case strings.HasPrefix(keyRef, pkcs11key.ReferenceScheme):
 		pkcs11UriConfig := pkcs11key.NewPkcs11UriConfig()
@@ -129,7 +135,7 @@ func SignerVerifierFromKeyRef(ctx context.Context, keyRef string, pf cosign.Pass
 		}
 
 		if len(s.Data) > 0 {
-			return cosign.LoadPrivateKey(s.Data["cosign.key"], s.Data["cosign.password"])
+			return cosign.LoadPrivateKey(s.Data["cosign.key"], s.Data["cosign.password"], defaultLoadOptions)
 		}
 	case strings.HasPrefix(keyRef, gitlab.ReferenceScheme):
 		split := strings.Split(keyRef, "://")
@@ -150,7 +156,7 @@ func SignerVerifierFromKeyRef(ctx context.Context, keyRef string, pf cosign.Pass
 			return nil, err
 		}
 
-		return cosign.LoadPrivateKey([]byte(pk), []byte(pass))
+		return cosign.LoadPrivateKey([]byte(pk), []byte(pass), defaultLoadOptions)
 	}
 
 	if strings.Contains(keyRef, "://") {
@@ -165,11 +171,11 @@ func SignerVerifierFromKeyRef(ctx context.Context, keyRef string, pf cosign.Pass
 		// ProviderNotFoundError is okay; loadKey handles other URL schemes
 	}
 
-	return loadKey(keyRef, pf)
+	return loadKey(keyRef, pf, defaultLoadOptions)
 }
 
 func PublicKeyFromKeyRef(ctx context.Context, keyRef string) (signature.Verifier, error) {
-	return PublicKeyFromKeyRefWithHashAlgo(ctx, keyRef, crypto.SHA256)
+	return PublicKeyFromKeyRefWithHashAlgo(ctx, keyRef, 0)
 }
 
 func PublicKeyFromKeyRefWithHashAlgo(ctx context.Context, keyRef string, hashAlgorithm crypto.Hash) (signature.Verifier, error) {

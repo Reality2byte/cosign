@@ -19,7 +19,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/sigstore/cosign/v2/test"
+	"github.com/sigstore/cosign/v3/internal/test"
 	"github.com/sigstore/sigstore/pkg/cryptoutils"
 )
 
@@ -34,7 +34,7 @@ func TestGetFulcioRoots(t *testing.T) {
 	subCert, _, _ := test.GenerateSubordinateCa(rootCert, rootPriv)
 	subPemCert, _ := cryptoutils.MarshalCertificateToPEM(subCert)
 
-	var chain []byte
+	chain := make([]byte, 0, len(subPemCert)+len(rootPemCert))
 	chain = append(chain, subPemCert...)
 	chain = append(chain, rootPemCert...)
 

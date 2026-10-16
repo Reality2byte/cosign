@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package debug
+package debug // nolint:revive
 
 import (
 	"context"
 	"fmt"
 	"io"
 
-	"github.com/sigstore/cosign/v2/pkg/providers"
+	"github.com/sigstore/cosign/v3/pkg/providers"
 )
 
 func ProviderCmd(ctx context.Context, w io.Writer) error {

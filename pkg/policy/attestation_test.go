@@ -28,11 +28,12 @@ import (
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/types"
-	"github.com/in-toto/in-toto-golang/in_toto"
-	"github.com/sigstore/cosign/v2/pkg/cosign/attestation"
-	"github.com/sigstore/cosign/v2/pkg/cosign/bundle"
-	"github.com/sigstore/cosign/v2/pkg/oci"
-	"github.com/sigstore/cosign/v2/pkg/oci/static"
+	in_toto_attest "github.com/in-toto/attestation/go/v1"
+	"github.com/sigstore/cosign/v3/pkg/cosign/attestation"
+	"github.com/sigstore/cosign/v3/pkg/cosign/bundle"
+	"github.com/sigstore/cosign/v3/pkg/oci"
+	"github.com/sigstore/cosign/v3/pkg/oci/static"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 type failingAttestation struct {
@@ -107,6 +108,7 @@ func TestFailures(t *testing.T) {
 	}{{payload: "", wantErrSubstring: "unmarshaling payload data"}, {payload: "{badness", wantErrSubstring: "unmarshaling payload data"},
 		{payload: `{"payloadType":"notmarshallable}`, wantErrSubstring: "unmarshaling payload data"},
 		{payload: `{"payload":"shou!ln'twork"}`, wantErrSubstring: "decoding payload"},
+		{payload: `{"payload":null}`, wantErrSubstring: "payload field is not a string"},
 		{payload: `{"payloadType":"finebutnopayload"}`, wantErrSubstring: "could not find payload"},
 		{payload: invalidTotoStatement, wantErrSubstring: "decoding payload: illegal base64"},
 	}
@@ -148,8 +150,8 @@ func TestAttestationToPayloadJson(t *testing.T) {
 		}
 		switch fileName {
 		case "custom":
-			var intoto in_toto.Statement
-			if err := json.Unmarshal(jsonBytes, &intoto); err != nil {
+			var intoto in_toto_attest.Statement
+			if err := protojson.Unmarshal(jsonBytes, &intoto); err != nil {
 				t.Fatalf("[%s] Wanted custom statement, can't unmarshal to it: %v", fileName, err)
 			}
 			checkPredicateType(t, attestation.CosignCustomProvenanceV01, intoto.PredicateType)
@@ -232,7 +234,7 @@ func getDirFiles(t *testing.T, dir string) []string {
 	if err != nil {
 		t.Fatalf("Failed to read dir : %s ReadFile() = %s", dir, err)
 	}
-	ret := []string{}
+	ret := make([]string, 0, len(files))
 	for _, file := range files {
 		ret = append(ret, file.Name())
 	}

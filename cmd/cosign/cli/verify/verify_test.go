@@ -27,21 +27,23 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
-	"github.com/sigstore/cosign/v2/internal/pkg/cosign/fulcio/fulcioroots"
-	"github.com/sigstore/cosign/v2/internal/ui"
-	"github.com/sigstore/cosign/v2/pkg/cosign"
-	"github.com/sigstore/cosign/v2/pkg/oci"
-	"github.com/sigstore/cosign/v2/pkg/oci/static"
-	"github.com/sigstore/cosign/v2/test"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/options"
+	"github.com/sigstore/cosign/v3/internal/pkg/cosign/fulcio/fulcioroots"
+	"github.com/sigstore/cosign/v3/internal/test"
+	"github.com/sigstore/cosign/v3/internal/ui"
+	"github.com/sigstore/cosign/v3/pkg/cosign"
+	"github.com/sigstore/cosign/v3/pkg/oci"
+	"github.com/sigstore/cosign/v3/pkg/oci/static"
 	"github.com/sigstore/sigstore/pkg/signature/payload"
 	"github.com/stretchr/testify/assert"
 )
@@ -227,7 +229,11 @@ func TestPrintVerification(t *testing.T) {
 }
 
 func appendSlices(slices [][]byte) []byte {
-	var tmp []byte
+	totalLen := 0
+	for _, s := range slices {
+		totalLen += len(s)
+	}
+	tmp := make([]byte, 0, totalLen)
 	for _, s := range slices {
 		tmp = append(tmp, s...)
 	}
@@ -261,6 +267,63 @@ func TestVerifyCertMissingIssuer(t *testing.T) {
 	err := verifyCommand.Exec(ctx, []string{"foo", "bar", "baz"})
 	if err == nil {
 		t.Fatal("verify expected 'need --certificate-oidc-issuer'")
+	}
+}
+
+func TestVerifyMutuallyExclusiveFlags(t *testing.T) {
+	ctx := context.Background()
+	tts := []struct {
+		name          string
+		cmd           VerifyCommand
+		expectedError error
+	}{
+		{
+			name: "both key and cert identity",
+			cmd: VerifyCommand{
+				KeyRef: "key.pub",
+				CertVerifyOptions: options.CertVerifyOptions{
+					CertIdentity: "hello@foo.com",
+				},
+			},
+			expectedError: &options.KeyAndIdentityParseError{},
+		},
+		{
+			name: "both key and cert identity regexp",
+			cmd: VerifyCommand{
+				KeyRef: "key.pub",
+				CertVerifyOptions: options.CertVerifyOptions{
+					CertIdentityRegexp: "^.*@foo.com$",
+				},
+			},
+			expectedError: &options.KeyAndIdentityParseError{},
+		},
+		{
+			name: "both cert identity and cert identity regexp",
+			cmd: VerifyCommand{
+				CertVerifyOptions: options.CertVerifyOptions{
+					CertIdentity:       "hello@foo.com",
+					CertIdentityRegexp: "^.*@foo.com$",
+				},
+			},
+			expectedError: &options.KeyAndIdentityParseError{},
+		},
+		{
+			name: "both key and security key",
+			cmd: VerifyCommand{
+				KeyRef: "key.pub",
+				Sk:     true,
+			},
+			expectedError: &options.PubKeyParseError{},
+		},
+	}
+
+	for _, tt := range tts {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cmd.Exec(ctx, []string{"foo", "bar", "baz"})
+			if !errors.Is(err, tt.expectedError) {
+				t.Fatalf("expected %T, got: %T, %v", tt.expectedError, err, err)
+			}
+		})
 	}
 }
 
@@ -344,5 +407,70 @@ func TestLoadCertsKeylessVerification(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+func TestTransformOutputSuccess(t *testing.T) {
+	// Build minimal in-toto statement
+	stmt := `{
+	  "_type": "https://in-toto.io/Statement/v0.1",
+	  "subject": [
+		{ "name": "artifact", "digest": { "sha256": "deadbeef" }, "annotations": { "foo": "bar" } }
+	  ],
+	  "predicateType": "https://slsa.dev/provenance/v0.2"
+	}`
+	// DSSE payloadType for in-toto
+	payloadType := "application/vnd.in-toto+json"
+	encodedStmt := base64.StdEncoding.EncodeToString([]byte(stmt))
+	dsseEnv := fmt.Sprintf(`{
+	  "payloadType": "%s",
+	  "payload": "%s",
+	  "signatures": [
+		{ "keyid": "test", "sig": "MAo=" }
+	  ]
+	}`, payloadType, encodedStmt)
+
+	sig, err := static.NewSignature([]byte(dsseEnv), "")
+	if err != nil {
+		t.Fatalf("creating static signature: %v", err)
+	}
+	fmt.Println(dsseEnv)
+
+	name := "example.com/my/image"
+	out, err := transformOutput([]oci.Signature{sig}, name)
+	if err != nil {
+		t.Fatalf("transformOutput returned error: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("expected 1 transformed signature, got %d", len(out))
+	}
+
+	payloadBytes, err := out[0].Payload()
+	if err != nil {
+		t.Fatalf("reading transformed payload: %v", err)
+	}
+
+	var sci payload.SimpleContainerImage
+	if err := json.Unmarshal(payloadBytes, &sci); err != nil {
+		t.Fatalf("unmarshal transformed payload: %v", err)
+	}
+
+	assert.Equal(t, name, sci.Critical.Identity.DockerReference, "docker reference mismatch")
+	assert.Equal(t, "sha256:deadbeef", sci.Critical.Image.DockerManifestDigest, "digest mismatch")
+	assert.Equal(t, "https://slsa.dev/provenance/v0.2", sci.Critical.Type, "type mismatch")
+	assert.Equal(t, map[string]any{"foo": "bar"}, sci.Optional, "missing annotation")
+}
+
+func TestVerifySkWithoutIdentities(t *testing.T) {
+	ctx := context.Background()
+	verifyCommand := VerifyCommand{
+		Sk: true,
+	}
+
+	err := verifyCommand.Exec(ctx, []string{"foo"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "opening piv token") {
+		t.Fatalf("expected PIV error, got: %v", err)
 	}
 }

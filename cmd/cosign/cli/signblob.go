@@ -16,16 +16,15 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"os"
+	"strings"
 
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/generate"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/sign"
-	"github.com/sigstore/cosign/v2/internal/ui"
-	"github.com/sigstore/cosign/v2/pkg/cosign"
-	"github.com/sigstore/cosign/v2/pkg/cosign/env"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/generate"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/options"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/sign"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/signcommon"
+	"github.com/sigstore/cosign/v3/pkg/cosign"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -36,11 +35,8 @@ func SignBlob() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "sign-blob",
-		Short: "Sign the supplied blob, outputting the base64-encoded signature to stdout.",
+		Short: "Sign the supplied blob, outputting the base64-encoded signature to stdout",
 		Example: `  cosign sign-blob --key <key path>|<kms uri> <blob>
-
-  # sign a blob with Google sign-in (experimental)
-  cosign sign-blob <FILE> --output-signature <FILE> --output-certificate <FILE>
 
   # sign a blob with a local key pair file
   cosign sign-blob --key cosign.key <FILE>
@@ -59,15 +55,41 @@ func SignBlob() *cobra.Command {
 
   # sign a blob with a key pair stored in Hashicorp Vault
   cosign sign-blob --key hashivault://[KEY] <FILE>`,
-		Args:             cobra.MinimumNArgs(1),
+		Args:             cobra.ExactArgs(1),
 		PersistentPreRun: options.BindViper,
 		PreRunE: func(_ *cobra.Command, _ []string) error {
 			if options.NOf(o.Key, o.SecurityKey.Use) > 1 {
 				return &options.KeyParseError{}
 			}
+
+			if o.NewBundleFormat && o.BundlePath == "" {
+				return fmt.Errorf("must specify --bundle with --new-bundle-format")
+			}
+
+			// Check if the algorithm is in the list of supported algorithms
+			supportedAlgorithms := cosign.GetSupportedAlgorithms()
+			isValid := false
+			for _, algo := range supportedAlgorithms {
+				if algo == o.SigningAlgorithm {
+					isValid = true
+					break
+				}
+			}
+			if !isValid {
+				return fmt.Errorf("invalid signing algorithm: %s. Supported algorithms are: %s",
+					o.SigningAlgorithm, strings.Join(supportedAlgorithms, ", "))
+			}
+
 			return nil
 		},
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := signcommon.ValidateSigningOptions(cmd.Context(), o.UseSigningConfig, o.SigningConfigPath,
+				o.Rekor.URL, o.Fulcio.URL, o.OIDC.Issuer, o.TSAServerURL,
+				o.TlogUpload, o.NewBundleFormat, o.BundlePath,
+				o.Output, "", o.OutputCertificate, "", o.OutputSignature, o.RFC3161TimestampPath); err != nil {
+				return err
+			}
+
 			oidcClientSecret, err := o.OIDC.ClientSecret()
 			if err != nil {
 				return err
@@ -81,13 +103,13 @@ func SignBlob() *cobra.Command {
 				FulcioURL:                      o.Fulcio.URL,
 				IDToken:                        o.Fulcio.IdentityToken,
 				FulcioAuthFlow:                 o.Fulcio.AuthFlow,
-				InsecureSkipFulcioVerify:       o.Fulcio.InsecureSkipFulcioVerify,
 				RekorURL:                       o.Rekor.URL,
 				OIDCIssuer:                     o.OIDC.Issuer,
 				OIDCClientID:                   o.OIDC.ClientID,
 				OIDCClientSecret:               oidcClientSecret,
 				OIDCRedirectURL:                o.OIDC.RedirectURL,
 				OIDCDisableProviders:           o.OIDC.DisableAmbientProviders,
+				OIDCProvider:                   o.OIDC.Provider,
 				BundlePath:                     o.BundlePath,
 				NewBundleFormat:                o.NewBundleFormat,
 				SkipConfirmation:               o.SkipConfirmation,
@@ -98,25 +120,21 @@ func SignBlob() *cobra.Command {
 				TSAServerURL:                   o.TSAServerURL,
 				RFC3161TimestampPath:           o.RFC3161TimestampPath,
 				IssueCertificateForExistingKey: o.IssueCertificate,
+				SigningAlgorithm:               o.SigningAlgorithm,
 			}
-			if (o.Key == "" || o.IssueCertificate) && env.Getenv(env.VariableSigstoreCTLogPublicKeyFile) == "" {
-				trustedMaterial, err := cosign.TrustedRoot()
-				if err != nil {
-					ui.Warnf(context.Background(), "Could not fetch trusted_root.json from the TUF repository. Continuing with individual targets. Error from TUF: %v", err)
-				}
-				ko.TrustedMaterial = trustedMaterial
+			if err := signcommon.LoadSigningConfigAndTrustedMaterial(cmd.Context(), &ko, o.UseSigningConfig, o.SigningConfigPath, o.TrustedRootPath); err != nil {
+				return err
 			}
 
-			for _, blob := range args {
-				// TODO: remove when the output flag has been deprecated
-				if o.Output != "" {
-					fmt.Fprintln(os.Stderr, "WARNING: the '--output' flag is deprecated and will be removed in the future. Use '--output-signature'")
-					o.OutputSignature = o.Output
-				}
+			// TODO: remove when the output flag has been deprecated
+			if o.Output != "" {
+				fmt.Fprintln(os.Stderr, "WARNING: the '--output' flag is deprecated and will be removed in the future. Use '--output-signature'")
+				o.OutputSignature = o.Output
+			}
 
-				if _, err := sign.SignBlobCmd(ro, ko, blob, o.Base64Output, o.OutputSignature, o.OutputCertificate, o.TlogUpload); err != nil {
-					return fmt.Errorf("signing %s: %w", blob, err)
-				}
+			blob := args[0]
+			if _, err := sign.SignBlobCmd(cmd.Context(), ro, ko, blob, o.Cert, o.CertChain, o.Base64Output, o.OutputSignature, o.OutputCertificate, o.TlogUpload); err != nil {
+				return fmt.Errorf("signing %s: %w", blob, err)
 			}
 			return nil
 		},

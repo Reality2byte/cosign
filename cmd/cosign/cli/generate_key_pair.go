@@ -16,8 +16,8 @@
 package cli
 
 import (
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/generate"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/generate"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/options"
 	"github.com/spf13/cobra"
 )
 
@@ -26,7 +26,7 @@ func GenerateKeyPair() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "generate-key-pair",
-		Short: "Generates a key-pair.",
+		Short: "Generates a key-pair",
 		Long:  "Generates a key-pair for signing.",
 		Example: `  cosign generate-key-pair [--kms KMSPATH]
 
@@ -59,6 +59,12 @@ func GenerateKeyPair() *cobra.Command {
 
   # generate a key-pair in GitLab with project id
   cosign generate-key-pair gitlab://[PROJECT_ID]
+
+  # generate a key-pair in GitLab with group name (accessible to all projects in the group)
+  cosign generate-key-pair gitlab://[GROUP_NAME]
+
+  # generate a key-pair in GitLab with subgroup name
+  cosign generate-key-pair gitlab://[GROUP_NAME]/[SUBGROUP_NAME]
 
 CAVEATS:
   This command interactively prompts for a password. You can use

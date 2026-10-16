@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"strings"
 
-	sigs "github.com/sigstore/cosign/v2/pkg/signature"
+	sigs "github.com/sigstore/cosign/v3/pkg/signature"
 	"github.com/spf13/cobra"
 )
 
@@ -33,7 +33,7 @@ var _ Interface = (*AnnotationOptions)(nil)
 func (o *AnnotationOptions) AnnotationsMap() (sigs.AnnotationsMap, error) {
 	ann := sigs.AnnotationsMap{}
 	for _, a := range o.Annotations {
-		kv := strings.Split(a, "=")
+		kv := strings.SplitN(a, "=", 2)
 		if len(kv) != 2 {
 			return ann, fmt.Errorf("unable to parse annotation: %s", a)
 		}

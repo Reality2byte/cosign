@@ -48,35 +48,26 @@ jobs:
       COSIGN_YES: "true"
 
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+
+      - name: Extract version of Go to use
+        shell: bash # To use awk on Windows
+        run: echo "GOVERSION=$(awk -F'[:@]' '/FROM golang/{print $2; exit}' Dockerfile)" >> $GITHUB_ENV
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: 'go.mod'
+          go-version: '${{ env.GOVERSION }}'
           check-latest: true
+          cache: false
+
       - name: build cosign and check sign-blob and verify-blob
         shell: bash
         run: |
           set -e
           make cosign
-          ./cosign sign-blob --output-certificate certificate.pem --output-signature README.md.sig README.md
-
-          if [ -s certificate.pem ]
-          then
-            echo "all good for key.pem"
-          else
-            echo "file does not exist, or is empty"
-            exit 1
-          fi
-
-          if [ -s README.md.sig ]
-          then
-            exit 0
-          else
-            echo "file does not exist, or is empty"
-            exit 1
-          fi
+          ./cosign sign-blob --bundle sigstore.json --yes README.md
 
           # Verify with sign-blob
-          ./cosign verify-blob README.md --certificate certificate.pem --signature README.md.sig
+          ./cosign verify-blob --bundle sigstore.json --certificate-identity-regexp ".*" --certificate-oidc-issuer-regexp ".*" README.md

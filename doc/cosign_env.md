@@ -6,6 +6,18 @@ Prints Cosign environment variables
 cosign env [flags]
 ```
 
+### Examples
+
+```
+  cosign env
+
+  # show environment variables with descriptions
+  cosign env --show-descriptions
+
+  # show environment variables including sensitive values
+  cosign env --show-descriptions --show-sensitive-values
+```
+
 ### Options
 
 ```
@@ -24,5 +36,5 @@ cosign env [flags]
 
 ### SEE ALSO
 
-* [cosign](cosign.md)	 - A tool for Container Signing, Verification and Storage in an OCI registry.
+* [cosign](cosign.md)	 - A tool for Container Signing, Verification and Storage in an OCI registry
 

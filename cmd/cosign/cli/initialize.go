@@ -16,8 +16,8 @@
 package cli
 
 import (
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/initialize"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/initialize"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/options"
 	"github.com/spf13/cobra"
 )
 
@@ -26,7 +26,7 @@ func Initialize() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "initialize",
-		Short: "Initializes SigStore root to retrieve trusted certificate and key targets for verification.",
+		Short: "Initializes SigStore root to retrieve trusted certificate and key targets for verification",
 		Long: `Initializes SigStore root to retrieve trusted certificate and key targets for verification.
 
 The following options are used by default:
@@ -39,11 +39,14 @@ This will enable you to point cosign to a separate TUF root.
 Any updated TUF repository will be written to $HOME/.sigstore/root/.
 
 Trusted keys and certificate used in cosign verification (e.g. verifying Fulcio issued certificates
-with Fulcio root CA) are pulled form the trusted metadata.`,
-		Example: `cosign initialize --mirror <url> --out <file>
+with Fulcio root CA) are pulled from the trusted metadata.`,
+		Example: `cosign initialize --mirror <url>
 
-# initialize root with distributed root keys, default mirror, and default out path.
+# initialize root with distributed root keys, using the default mirror.
 cosign initialize
+
+# initialize root with distributed root keys, using the staging mirror.
+cosign initialize --staging
 
 # initialize with an out-of-band root key file, using the default mirror.
 cosign initialize --root <url>
@@ -55,6 +58,9 @@ cosign initialize --mirror <url> --root <url>
 cosign initialize --mirror <url> --root <url> --root-checksum <sha256>`,
 		PersistentPreRun: options.BindViper,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if o.Staging {
+				return initialize.DoInitializeStaging(cmd.Context())
+			}
 			return initialize.DoInitializeWithRootChecksum(cmd.Context(), o.Root, o.Mirror, o.RootChecksum)
 		},
 	}

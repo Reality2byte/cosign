@@ -17,7 +17,7 @@ package options
 import (
 	"errors"
 
-	"github.com/sigstore/cosign/v2/pkg/cosign"
+	"github.com/sigstore/cosign/v3/pkg/cosign"
 	"github.com/spf13/cobra"
 )
 
@@ -47,46 +47,59 @@ func (o *CertVerifyOptions) AddFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&o.Cert, "certificate", "",
 		"path to the public certificate. The certificate will be verified against the Fulcio roots if the --certificate-chain option is not passed.")
 	_ = cmd.MarkFlagFilename("certificate", certificateExts...)
+	_ = cmd.Flags().MarkDeprecated("certificate", "please use --bundle with --trusted-root to provide the public certificate")
 
 	cmd.Flags().StringVar(&o.CertIdentity, "certificate-identity", "",
 		"The identity expected in a valid Fulcio certificate. Valid values include email address, DNS names, IP addresses, and URIs. Either --certificate-identity or --certificate-identity-regexp must be set for keyless flows.")
+	_ = cmd.RegisterFlagCompletionFunc("certificate-identity", cobra.NoFileCompletions)
 
 	cmd.Flags().StringVar(&o.CertIdentityRegexp, "certificate-identity-regexp", "",
 		"A regular expression alternative to --certificate-identity. Accepts the Go regular expression syntax described at https://golang.org/s/re2syntax. Either --certificate-identity or --certificate-identity-regexp must be set for keyless flows.")
+	_ = cmd.RegisterFlagCompletionFunc("certificate-identity-regexp", cobra.NoFileCompletions)
 
 	cmd.Flags().StringVar(&o.CertOidcIssuer, "certificate-oidc-issuer", "",
 		"The OIDC issuer expected in a valid Fulcio certificate, e.g. https://token.actions.githubusercontent.com or https://oauth2.sigstore.dev/auth. Either --certificate-oidc-issuer or --certificate-oidc-issuer-regexp must be set for keyless flows.")
+	_ = cmd.RegisterFlagCompletionFunc("certificate-oidc-issuer", cobra.NoFileCompletions)
 
 	cmd.Flags().StringVar(&o.CertOidcIssuerRegexp, "certificate-oidc-issuer-regexp", "",
 		"A regular expression alternative to --certificate-oidc-issuer. Accepts the Go regular expression syntax described at https://golang.org/s/re2syntax. Either --certificate-oidc-issuer or --certificate-oidc-issuer-regexp must be set for keyless flows.")
+	_ = cmd.RegisterFlagCompletionFunc("certificate-oidc-issuer-regexp", cobra.NoFileCompletions)
 
 	// -- Cert extensions begin --
 	// Source: https://github.com/sigstore/fulcio/blob/main/docs/oid-info.md
 	cmd.Flags().StringVar(&o.CertGithubWorkflowTrigger, "certificate-github-workflow-trigger", "",
 		"contains the event_name claim from the GitHub OIDC Identity token that contains the name of the event that triggered the workflow run")
+	_ = cmd.RegisterFlagCompletionFunc("certificate-github-workflow-trigger", cobra.NoFileCompletions)
 
 	cmd.Flags().StringVar(&o.CertGithubWorkflowSha, "certificate-github-workflow-sha", "",
 		"contains the sha claim from the GitHub OIDC Identity token that contains the commit SHA that the workflow run was based upon.")
+	_ = cmd.RegisterFlagCompletionFunc("certificate-github-workflow-sha", cobra.NoFileCompletions)
 
 	cmd.Flags().StringVar(&o.CertGithubWorkflowName, "certificate-github-workflow-name", "",
 		"contains the workflow claim from the GitHub OIDC Identity token that contains the name of the executed workflow.")
+	_ = cmd.RegisterFlagCompletionFunc("certificate-github-workflow-name", cobra.NoFileCompletions)
 
 	cmd.Flags().StringVar(&o.CertGithubWorkflowRepository, "certificate-github-workflow-repository", "",
 		"contains the repository claim from the GitHub OIDC Identity token that contains the repository that the workflow run was based upon")
+	_ = cmd.RegisterFlagCompletionFunc("certificate-github-workflow-repository", cobra.NoFileCompletions)
 
 	cmd.Flags().StringVar(&o.CertGithubWorkflowRef, "certificate-github-workflow-ref", "",
 		"contains the ref claim from the GitHub OIDC Identity token that contains the git ref that the workflow run was based upon.")
+	_ = cmd.RegisterFlagCompletionFunc("certificate-github-workflow-ref", cobra.NoFileCompletions)
 	// -- Cert extensions end --
+
 	cmd.Flags().StringVar(&o.CAIntermediates, "ca-intermediates", "",
 		"path to a file of intermediate CA certificates in PEM format which will be needed "+
 			"when building the certificate chains for the signing certificate. "+
 			"The flag is optional and must be used together with --ca-roots, conflicts with "+
 			"--certificate-chain.")
 	_ = cmd.MarkFlagFilename("ca-intermediates", certificateExts...)
+	_ = cmd.Flags().MarkDeprecated("ca-intermediates", "please use --trusted-root to provide CA certificates")
 	cmd.Flags().StringVar(&o.CARoots, "ca-roots", "",
 		"path to a bundle file of CA certificates in PEM format which will be needed "+
 			"when building the certificate chains for the signing certificate. Conflicts with --certificate-chain.")
 	_ = cmd.MarkFlagFilename("ca-roots", certificateExts...)
+	_ = cmd.Flags().MarkDeprecated("ca-roots", "please use --trusted-root to provide CA certificates")
 
 	cmd.Flags().StringVar(&o.CertChain, "certificate-chain", "",
 		"path to a list of CA certificates in PEM format which will be needed "+
@@ -96,11 +109,14 @@ func (o *CertVerifyOptions) AddFlags(cmd *cobra.Command) {
 	_ = cmd.MarkFlagFilename("certificate-chain", certificateExts...)
 	cmd.MarkFlagsMutuallyExclusive("ca-roots", "certificate-chain")
 	cmd.MarkFlagsMutuallyExclusive("ca-intermediates", "certificate-chain")
+	_ = cmd.Flags().MarkDeprecated("certificate-chain", "please use --trusted-root to provide the certificate chain")
 
 	cmd.Flags().StringVar(&o.SCT, "sct", "",
 		"path to a detached Signed Certificate Timestamp, formatted as a RFC6962 AddChainResponse struct. "+
 			"If a certificate contains an SCT, verification will check both the detached and embedded SCTs.")
 	// _ = cmd.MarkFlagFilename("sct") // no typical extensions
+	_ = cmd.Flags().MarkDeprecated("sct", "a Signed Certificate Timestamp is now provided via a Sigstore bundle")
+
 	cmd.Flags().BoolVar(&o.IgnoreSCT, "insecure-ignore-sct", false,
 		"when set, verification will not check that a certificate contains an embedded SCT, a proof of "+
 			"inclusion in a certificate transparency log")

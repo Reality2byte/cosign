@@ -20,15 +20,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
-	"github.com/sigstore/cosign/v2/pkg/cosign"
-	"github.com/sigstore/cosign/v2/pkg/oci/platform"
-	ociremote "github.com/sigstore/cosign/v2/pkg/oci/remote"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/options"
+	"github.com/sigstore/cosign/v3/pkg/cosign"
+	"github.com/sigstore/cosign/v3/pkg/oci/platform"
+	ociremote "github.com/sigstore/cosign/v3/pkg/oci/remote"
 )
 
-func AttestationCmd(ctx context.Context, regOpts options.RegistryOptions, attOptions options.AttestationDownloadOptions, imageRef string) error {
+func AttestationCmd(ctx context.Context, regOpts options.RegistryOptions, attOptions options.AttestationDownloadOptions, imageRef string, out io.Writer) error {
 	ref, err := name.ParseReference(imageRef, regOpts.NameOptions()...)
 	if err != nil {
 		return err
@@ -43,6 +44,37 @@ func AttestationCmd(ctx context.Context, regOpts options.RegistryOptions, attOpt
 		predicateType, err = options.ParsePredicateType(attOptions.PredicateType)
 		if err != nil {
 			return err
+		}
+	}
+
+	var foundMatches bool
+
+	// Try bundles first
+	newBundles, _, err := cosign.GetBundles(ctx, ref, ociremoteOpts)
+	if err == nil && len(newBundles) > 0 {
+		for _, eachBundle := range newBundles {
+			if predicateType != "" {
+				envelope, err := eachBundle.Envelope()
+				if err != nil || envelope == nil {
+					continue
+				}
+				statement, err := envelope.Statement()
+				if err != nil || statement == nil {
+					continue
+				}
+				if statement.PredicateType != predicateType {
+					continue
+				}
+			}
+			b, err := json.Marshal(eachBundle)
+			if err != nil {
+				return err
+			}
+			_, err = out.Write(append(b, byte('\n')))
+			if err != nil {
+				return err
+			}
+			foundMatches = true
 		}
 	}
 
@@ -76,7 +108,16 @@ func AttestationCmd(ctx context.Context, regOpts options.RegistryOptions, attOpt
 		if err != nil {
 			return err
 		}
-		fmt.Println(string(b))
+		_, err = out.Write(append(b, byte('\n')))
+		if err != nil {
+			return err
+		}
+		foundMatches = true
 	}
+
+	if predicateType != "" && !foundMatches {
+		return fmt.Errorf("no attestations with predicate type '%s' found", predicateType)
+	}
+
 	return nil
 }

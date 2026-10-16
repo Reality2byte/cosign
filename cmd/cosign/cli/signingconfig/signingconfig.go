@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sigstore/cosign/v3/pkg/cosign"
 	prototrustroot "github.com/sigstore/protobuf-specs/gen/pb-go/trustroot/v1"
 	"github.com/sigstore/sigstore-go/pkg/root"
 )
@@ -34,6 +35,14 @@ type CreateCmd struct {
 	TSAConfig         string
 	RekorConfig       string
 	Out               string
+	BaseConfig        string
+
+	WithDefaultServices bool
+	NoDefaultFulcio     bool
+	NoDefaultRekor      bool
+	NoDefaultOIDC       bool
+	NoDefaultTSA        bool
+	RekorV2             bool
 }
 
 func (c *CreateCmd) Exec(_ context.Context) error {
@@ -48,15 +57,70 @@ func (c *CreateCmd) Exec(_ context.Context) error {
 	rekorServices := make([]root.Service, 0, len(c.RekorSpecs))
 	oidcProviders := make([]root.Service, 0, len(c.OIDCProviderSpecs))
 	tsaServices := make([]root.Service, 0, len(c.TSASpecs))
+	var rekorConfig root.ServiceConfiguration
+	var tsaConfig root.ServiceConfiguration
+	var err error
 
-	rekorConfig, err := parseServiceConfig(c.RekorConfig)
-	if err != nil {
-		return fmt.Errorf("parsing rekor-config: %w", err)
+	if c.BaseConfig != "" {
+		var sc *root.SigningConfig
+		sc, err = root.NewSigningConfigFromPath(c.BaseConfig)
+		if err != nil {
+			return fmt.Errorf("loading base config from %s: %w", c.BaseConfig, err)
+		}
+		if len(c.FulcioSpecs) == 0 && !c.NoDefaultFulcio {
+			fulcioServices = append(fulcioServices, sc.FulcioCertificateAuthorityURLs()...)
+		}
+		if len(c.RekorSpecs) == 0 && !c.NoDefaultRekor {
+			rekorServices = append(rekorServices, sc.RekorLogURLs()...)
+			rekorConfig = sc.RekorLogURLsConfig()
+		}
+		if len(c.OIDCProviderSpecs) == 0 && !c.NoDefaultOIDC {
+			oidcProviders = append(oidcProviders, sc.OIDCProviderURLs()...)
+		}
+		if len(c.TSASpecs) == 0 && !c.NoDefaultTSA {
+			tsaServices = append(tsaServices, sc.TimestampAuthorityURLs()...)
+			tsaConfig = sc.TimestampAuthorityURLsConfig()
+		}
 	}
 
-	tsaConfig, err := parseServiceConfig(c.TSAConfig)
-	if err != nil {
-		return fmt.Errorf("parsing tsa-config: %w", err)
+	if c.WithDefaultServices {
+		var sc *root.SigningConfig
+		if c.RekorV2 {
+			sc, err = cosign.SigningConfigRekorV2()
+		} else {
+			sc, err = cosign.SigningConfig()
+		}
+		if err != nil {
+			return fmt.Errorf("getting default trusted root: %w", err)
+		}
+		if !c.NoDefaultFulcio {
+			fulcioServices = append(fulcioServices, sc.FulcioCertificateAuthorityURLs()...)
+		}
+		if !c.NoDefaultRekor {
+			rekorServices = append(rekorServices, sc.RekorLogURLs()...)
+			rekorConfig = sc.RekorLogURLsConfig()
+		}
+		if !c.NoDefaultOIDC {
+			oidcProviders = append(oidcProviders, sc.OIDCProviderURLs()...)
+		}
+		if !c.NoDefaultTSA {
+			tsaServices = append(tsaServices, sc.TimestampAuthorityURLs()...)
+			tsaConfig = sc.TimestampAuthorityURLsConfig()
+		}
+	}
+
+	if c.RekorConfig != "" {
+		rekorConfig, err = parseServiceConfig(c.RekorConfig)
+		if err != nil {
+			return fmt.Errorf("parsing rekor-config: %w", err)
+		}
+	}
+
+	if c.TSAConfig != "" {
+		tsaConfig, err = parseServiceConfig(c.TSAConfig)
+		if err != nil {
+			return fmt.Errorf("parsing tsa-config: %w", err)
+		}
 	}
 
 	for _, spec := range c.FulcioSpecs {

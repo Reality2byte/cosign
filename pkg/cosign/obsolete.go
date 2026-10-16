@@ -19,15 +19,15 @@ import (
 	"context"
 
 	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/sigstore/cosign/v2/internal/ui"
+	"github.com/sigstore/cosign/v3/internal/ui"
 	"github.com/sigstore/sigstore/pkg/signature/payload"
 )
 
 // ObsoletePayload returns the implied payload that some commands expect to match
 // the signature if no payload is provided by the user.
 // DO NOT ADD ANY NEW CALLERS OF THIS.
-func ObsoletePayload(ctx context.Context, digestedImage name.Digest) ([]byte, error) {
-	blob, err := (&payload.Cosign{Image: digestedImage}).MarshalJSON()
+func ObsoletePayload(ctx context.Context, digestedImage name.Digest, annotations map[string]interface{}) ([]byte, error) {
+	blob, err := (&payload.Cosign{Image: digestedImage, Annotations: annotations}).MarshalJSON()
 	if err != nil {
 		return nil, err
 	}

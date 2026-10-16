@@ -23,9 +23,9 @@ import (
 	"fmt"
 
 	"github.com/in-toto/in-toto-golang/in_toto"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
-	"github.com/sigstore/cosign/v2/pkg/cosign/attestation"
-	"github.com/sigstore/cosign/v2/pkg/oci"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/options"
+	"github.com/sigstore/cosign/v3/pkg/cosign/attestation"
+	"github.com/sigstore/cosign/v3/pkg/oci"
 )
 
 // PayloadProvider is a subset of oci.Signature that only provides the
@@ -77,18 +77,22 @@ func AttestationToPayloadJSON(_ context.Context, predicateType string, verifiedA
 	}
 
 	var decodedPayload []byte
-	if val, ok := payloadData["payload"]; ok {
-		decodedPayload, err = base64.StdEncoding.DecodeString(val.(string))
-		if err != nil {
-			return nil, "", fmt.Errorf("decoding payload: %w", err)
-		}
-	} else {
+	val, ok := payloadData["payload"]
+	if !ok {
 		return nil, "", fmt.Errorf("could not find payload in payload data")
+	}
+	payloadStr, ok := val.(string)
+	if !ok {
+		return nil, "", fmt.Errorf("invalid payload: payload field is not a string (got %T)", val)
+	}
+	decodedPayload, err = base64.StdEncoding.DecodeString(payloadStr)
+	if err != nil {
+		return nil, "", fmt.Errorf("decoding payload: %w", err)
 	}
 
 	// Only apply the policy against the requested predicate type
-	var statement in_toto.Statement
-	if err := json.Unmarshal(decodedPayload, &statement); err != nil {
+	statement := &attestation.Statement{}
+	if err := statement.UnmarshalJSON(decodedPayload); err != nil {
 		return nil, "", fmt.Errorf("unmarshal in-toto statement: %w", err)
 	}
 	if statement.PredicateType != predicateURI {
@@ -102,7 +106,7 @@ func AttestationToPayloadJSON(_ context.Context, predicateType string, verifiedA
 	var payload []byte
 	switch predicateType {
 	case options.PredicateCustom:
-		payload, err = json.Marshal(statement)
+		payload, err = statement.MarshalJSON()
 		if err != nil {
 			return nil, statement.PredicateType, fmt.Errorf("generating CosignStatement: %w", err)
 		}
@@ -153,7 +157,7 @@ func AttestationToPayloadJSON(_ context.Context, predicateType string, verifiedA
 		}
 	default:
 		// Valid URI type reaches here.
-		payload, err = json.Marshal(statement)
+		payload, err = statement.MarshalJSON()
 		if err != nil {
 			return nil, statement.PredicateType, fmt.Errorf("generating Statement: %w", err)
 		}

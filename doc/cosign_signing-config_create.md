@@ -7,6 +7,8 @@ Create a Sigstore protobuf signing config
 Create a Sigstore protobuf signing config by supplying verification material for Fulcio, Rekor, OIDC, and TSA services.
 Each service is specified via a repeatable flag (--fulcio, --rekor, --oidc-provider, --tsa) that takes a comma-separated list of key-value pairs.
 
+Use --base-config to start from an existing signing config and override specific services. Service flags will replace services from the base config.
+
 ```
 cosign signing-config create [flags]
 ```
@@ -14,6 +16,7 @@ cosign signing-config create [flags]
 ### Examples
 
 ```
+# Create from scratch
 cosign signing-config create \
     --fulcio="url=https://fulcio.sigstore.dev,api-version=1,start-time=2024-01-01T00:00:00Z,end-time=2025-01-01T00:00:00Z,operator=sigstore.dev" \
     --rekor="url=https://rekor.sigstore.dev,api-version=1,start-time=2024-01-01T00:00:00Z,operator=sigstore.dev" \
@@ -22,14 +25,30 @@ cosign signing-config create \
     --tsa="url=https://timestamp.sigstore.dev/api/v1/timestamp,api-version=1,start-time=2024-01-01T00:00:00Z,operator=sigstore.dev" \
     --tsa-config="EXACT:1" \
     --out signing-config.json
+
+# Use Sigstore TUF defaults
+cosign signing-config create \
+    --with-default-services \
+    --out sigstore-signing-config.json
+
+# Override OIDC provider from base config
+cosign signing-config create \
+    --base-config signing_config.v0.2.json \
+    --oidc-provider="url=https://custom-oidc.example.com,api-version=1,start-time=2024-01-01T00:00:00Z,operator=example.com" \
+    --out custom-signing-config.json
 ```
 
 ### Options
 
 ```
+      --base-config string          path to base signing config file to use as starting point. Service flags will replace services from the base config.
       --fulcio stringArray          fulcio service specification, as a comma-separated key-value list.
                                     Required keys: url, api-version (integer), start-time, operator. Optional keys: end-time.
   -h, --help                        help for create
+      --no-default-fulcio           removes the default Fulcio URLs from the signing config.
+      --no-default-oidc             removes the default OIDC provider URLs from the signing config.
+      --no-default-rekor            removes the default Rekor URLs from the signing config.
+      --no-default-tsa              removes the default TSA URLs from the signing config.
       --oidc-provider stringArray   oidc provider specification, as a comma-separated key-value list.
                                     Required keys: url, api-version (integer), start-time, operator. Optional keys: end-time.
       --out string                  path to output signing config
@@ -39,6 +58,8 @@ cosign signing-config create \
       --tsa stringArray             timestamping authority specification, as a comma-separated key-value list.
                                     Required keys: url, api-version (integer), start-time, operator. Optional keys: end-time.
       --tsa-config string           timestamping authority configuration. Required if --tsa is provided. One of: ANY, ALL, EXACT:<count>
+      --with-default-rekor-v2       use the Sigstore TUF root, with the Rekor v2 service, as default values to populate the signing config. Specifying the other service flags will override the default values.
+      --with-default-services       use the Sigstore TUF root as default values to populate the signing config. Specifying the other service flags will override the default values.
 ```
 
 ### Options inherited from parent commands

@@ -30,7 +30,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/protobuf/proto"
 
-	ociremote "github.com/sigstore/cosign/v2/pkg/oci/remote"
+	ociremote "github.com/sigstore/cosign/v3/pkg/oci/remote"
 	sgbundle "github.com/sigstore/sigstore-go/pkg/bundle"
 	"github.com/sigstore/sigstore-go/pkg/root"
 )
@@ -53,7 +53,7 @@ func TestGetBundles_Empty(t *testing.T) {
 	assert.NoError(t, err)
 
 	// If tag doesn't exist, should return ErrImageTagNotFound
-	bundles, hash, err := getBundles(context.Background(), ref, &CheckOpts{})
+	bundles, hash, err := GetBundles(context.Background(), ref, []ociremote.Option{})
 	imgTagNotFound := &ErrImageTagNotFound{}
 	assert.ErrorAs(t, err, &imgTagNotFound)
 	assert.Len(t, bundles, 0)
@@ -65,7 +65,7 @@ func TestGetBundles_Empty(t *testing.T) {
 	assert.NoError(t, remote.Write(ref, img))
 
 	// Check that no matching attestation error is returned
-	bundles, hash, err = getBundles(context.Background(), ref, &CheckOpts{})
+	bundles, hash, err = GetBundles(context.Background(), ref, []ociremote.Option{})
 	var noMatchErr *ErrNoMatchingAttestations
 	assert.ErrorAs(t, err, &noMatchErr)
 	assert.Len(t, bundles, 0)
@@ -81,7 +81,7 @@ func TestGetBundles_Empty(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Should still return no matching attestation error, as it failed to parse the bundle
-	bundles, hash, err = getBundles(context.Background(), ref, &CheckOpts{})
+	bundles, hash, err = GetBundles(context.Background(), ref, []ociremote.Option{})
 	assert.ErrorAs(t, err, &noMatchErr)
 	assert.Len(t, bundles, 0)
 	assert.Nil(t, hash)
@@ -111,12 +111,66 @@ func TestGetBundles_Valid(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Retrieve the attestation
-	bundles, hash, err := getBundles(context.Background(), ref, &CheckOpts{})
+	bundles, hash, err := GetBundles(context.Background(), ref, []ociremote.Option{})
 	assert.NoError(t, err)
 	assert.Len(t, bundles, 1)
 	assert.NotNil(t, hash)
 
 	// Compare the output to the test data
+	expected := sgbundle.Bundle{}
+	err = expected.UnmarshalJSON(testAttestation)
+	assert.NoError(t, err)
+	if !proto.Equal(bundles[0].Bundle, &expected) {
+		t.Errorf("got %v, want %v", bundles[0].Bundle, &expected)
+	}
+}
+
+func TestGetBundles_WithTargetRepository(t *testing.T) {
+	r := registry.New(registry.WithReferrersSupport(true))
+	s := httptest.NewServer(r)
+	defer s.Close()
+
+	u, err := url.Parse(s.URL)
+	assert.NoError(t, err)
+	host := u.Host
+
+	sourceRef, err := name.ParseReference(fmt.Sprintf("%s/source-repo:tag", host))
+	assert.NoError(t, err)
+
+	targetRepo, err := name.NewRepository(fmt.Sprintf("%s/target-repo", host))
+	assert.NoError(t, err)
+
+	// Write the source image.
+	assert.NoError(t, remote.Write(sourceRef, empty.Image))
+
+	// Get the source image digest.
+	desc, err := remote.Head(sourceRef)
+	assert.NoError(t, err)
+
+	// Write the attestation referrer into the target repo.
+	// Pass the source digest as subject (so WriteReferrer can HEAD it) and
+	// WithTargetRepository so the referrer manifest is stored in target-repo.
+	sourceDigestRef := sourceRef.Context().Digest(desc.Digest.String())
+	err = ociremote.WriteAttestationNewBundleFormat(sourceDigestRef, testAttestation, "https://cosign.sigstore.dev/attestation/v1",
+		ociremote.WithTargetRepository(targetRepo),
+	)
+	assert.NoError(t, err)
+
+	// Without WithTargetRepository, the bundle is not found in the source repo.
+	bundles, hash, err := GetBundles(context.Background(), sourceRef, []ociremote.Option{})
+	var noMatchErr *ErrNoMatchingAttestations
+	assert.ErrorAs(t, err, &noMatchErr)
+	assert.Len(t, bundles, 0)
+	assert.Nil(t, hash)
+
+	// With WithTargetRepository, the bundle is found in the target repo.
+	bundles, hash, err = GetBundles(context.Background(), sourceRef, []ociremote.Option{
+		ociremote.WithTargetRepository(targetRepo),
+	})
+	assert.NoError(t, err)
+	assert.Len(t, bundles, 1)
+	assert.NotNil(t, hash)
+
 	expected := sgbundle.Bundle{}
 	err = expected.UnmarshalJSON(testAttestation)
 	assert.NoError(t, err)

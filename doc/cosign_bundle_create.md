@@ -10,13 +10,23 @@ Create a Sigstore protobuf bundle by supplying signed material
 cosign bundle create [flags]
 ```
 
+### Examples
+
+```
+  # create a bundle from a signature and certificate
+  cosign bundle create --artifact <path> --signature <sig> --certificate <cert> --out bundle.sigstore.json
+
+  # create a bundle from an attestation
+  cosign bundle create --artifact <path> --attestation <att> --out bundle.sigstore.json
+```
+
 ### Options
 
 ```
       --artifact string            path to artifact FILE
       --attestation string         path to attestation FILE
       --bundle string              path to old format bundle FILE
-      --certificate string         path to the signing certificate, likely from Fulco.
+      --certificate string         path to the signing certificate, likely from Fulcio.
   -h, --help                       help for create
       --ignore-tlog                ignore transparency log verification, to be used when an artifact signature has not been uploaded to the transparency log.
       --key string                 path to the public key file, KMS URI or Kubernetes Secret

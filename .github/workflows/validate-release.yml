@@ -16,24 +16,29 @@
 name: CI-Validate-Release-Job
 
 on:
-  push:
+  pull_request:
     branches:
       - main
       - release-*
-  pull_request:
+
+permissions: {}
 
 jobs:
   check-signature:
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
     container:
-      image: ghcr.io/sigstore/cosign/cosign:v2.5.2-dev@sha256:14a20131240190350e18f002bdd61345d2803eff370913737392281e834ee22a
+      image: ghcr.io/sigstore/cosign/cosign:v3.1.3-dev@sha256:3b1a2e2742351ab440255626f079a337e6c263249644800a52f5eaa389a5b730
 
     steps:
       - name: Check Signature
         run: |
-          cosign verify ghcr.io/gythialy/golang-cross:v1.24.5-0@sha256:492c51e60ed27ff597511b0a24e6c5acb6e3e2e97bb68d7bd35f81a7e3dfa4d0 \
+          cosign verify ghcr.io/gythialy/golang-cross:v1.27.1-1@sha256:b288b491c96203db38192b24e25f5769e8e2a6618ebaa44ec0e269e74a94447d \
           --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-          --certificate-identity "https://github.com/gythialy/golang-cross/.github/workflows/release-golang-cross.yml@refs/tags/v1.24.5-0"
+          --certificate-identity "https://github.com/gythialy/golang-cross/.github/workflows/builder.yml@refs/tags/v1.27.1-1"
         env:
           TUF_ROOT: /tmp
 
@@ -42,16 +47,17 @@ jobs:
     needs:
       - check-signature
 
+    permissions:
+      contents: read
+
     container:
-      image: ghcr.io/gythialy/golang-cross:v1.24.5-0@sha256:492c51e60ed27ff597511b0a24e6c5acb6e3e2e97bb68d7bd35f81a7e3dfa4d0
+      image: ghcr.io/gythialy/golang-cross:v1.27.1-1@sha256:b288b491c96203db38192b24e25f5769e8e2a6618ebaa44ec0e269e74a94447d
       volumes:
         - /usr:/host_usr
         - /opt:/host_opt
 
-    permissions: {}
-
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -83,6 +89,7 @@ jobs:
           rm -rf /host_usr/local/share/boost || true
           rm -rf /host_opt/hostedtoolcache/ || true
           rm -rf /host_opt/ghc || true
+
       - name: check disk space
         run: df -h
 
@@ -90,7 +97,7 @@ jobs:
         run: make snapshot
         env:
           PROJECT_ID: honk-fake-project
-          RUNTIME_IMAGE: gcr.io/distroless/static-debian12:nonroot
+          RUNTIME_IMAGE: gcr.io/distroless/static-debian13:nonroot
 
       - name: check binaries
         run: |

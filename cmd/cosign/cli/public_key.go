@@ -18,9 +18,9 @@ package cli
 import (
 	"os"
 
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/generate"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/publickey"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/generate"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/options"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/publickey"
 	"github.com/spf13/cobra"
 )
 
@@ -29,7 +29,7 @@ func PublicKey() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "public-key",
-		Short: "Gets a public key from the key-pair.",
+		Short: "Gets a public key from the key-pair",
 		Long:  "Gets a public key from the key-pair and\nwrites to a specified file. By default, it will write to standard out.",
 		Example: `
   # extract public key from private key to a specified out file.

@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package cosign_test
+package cosign
 
 import (
 	"bytes"
@@ -23,14 +23,20 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"io"
+	"sync"
 	"testing"
+	"time"
 
-	"github.com/sigstore/cosign/v2/pkg/cosign"
+	"github.com/sigstore/cosign/v3/internal/test"
 	protobundle "github.com/sigstore/protobuf-specs/gen/pb-go/bundle/v1"
 	protocommon "github.com/sigstore/protobuf-specs/gen/pb-go/common/v1"
+	v1 "github.com/sigstore/protobuf-specs/gen/pb-go/rekor/v1"
 	sgbundle "github.com/sigstore/sigstore-go/pkg/bundle"
+	"github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/sigstore/sigstore-go/pkg/testing/ca"
 	"github.com/sigstore/sigstore-go/pkg/tlog"
 	"github.com/sigstore/sigstore-go/pkg/verify"
@@ -41,8 +47,11 @@ import (
 type bundleMutator struct {
 	verify.SignedEntity
 
-	eraseTSA  bool
-	eraseTlog bool
+	eraseTSA     bool
+	eraseTlog    bool
+	eraseSET     bool
+	corruptSET   bool
+	tlogOverride []*tlog.Entry
 }
 
 func (b *bundleMutator) Timestamps() ([][]byte, error) {
@@ -53,10 +62,45 @@ func (b *bundleMutator) Timestamps() ([][]byte, error) {
 }
 
 func (b *bundleMutator) TlogEntries() ([]*tlog.Entry, error) {
+	if b.tlogOverride != nil {
+		return b.tlogOverride, nil
+	}
 	if b.eraseTlog {
 		return []*tlog.Entry{}, nil
 	}
+	if b.eraseSET || b.corruptSET {
+		set := []byte{}
+		if b.corruptSET {
+			set = []byte("invalid")
+		}
+		var entries []*tlog.Entry
+		oldEntries, err := b.SignedEntity.TlogEntries()
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range oldEntries {
+			body, err := base64.StdEncoding.DecodeString(entry.Body().(string))
+			if err != nil {
+				return nil, err
+			}
+			mutEntry, err := tlog.NewEntry(body, entry.IntegratedTime().Unix(), entry.LogIndex(), []byte(entry.LogKeyID()), set, nil)
+			if err != nil {
+				return nil, err
+			}
+			entries = append(entries, mutEntry)
+		}
+		return entries, nil
+	}
 	return b.SignedEntity.TlogEntries()
+}
+
+type fulcioOverrideTrustedMaterial struct {
+	root.TrustedMaterial
+	cas []root.CertificateAuthority
+}
+
+func (f *fulcioOverrideTrustedMaterial) FulcioCertificateAuthorities() []root.CertificateAuthority {
+	return f.cas
 }
 
 func TestVerifyBundle(t *testing.T) {
@@ -73,7 +117,7 @@ func TestVerifyBundle(t *testing.T) {
 
 	identity := "foo@example.com"
 	issuer := "example issuer"
-	standardIdentities := []cosign.Identity{
+	standardIdentities := []Identity{
 		{
 			Issuer:  issuer,
 			Subject: identity,
@@ -90,16 +134,40 @@ func TestVerifyBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// VirtualSigstore leaf certificates are valid from now for 10 minutes, and
+	// its Rekor key is valid from one hour ago until one hour from now. An
+	// integrated time 30 minutes ago passes the SET check but is outside the
+	// certificate validity. The TSA timestamp is still generated at the current time.
+	expiredBlobSig, err := virtualSigstore.SignAtTime(identity, issuer, artifact, time.Now().Add(-30*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	otherBlobSig, err := virtualSigstore.Sign(identity, issuer, artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherTlogEntries, err := otherBlobSig.TlogEntries()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Keep the Rekor and TSA keys so that the certificate chain check is what fails.
+	wrongFulcioRoot := &fulcioOverrideTrustedMaterial{
+		TrustedMaterial: virtualSigstore,
+		cas:             virtualSigstore2.FulcioCertificateAuthorities(),
+	}
+
 	for _, tc := range []struct {
 		name                 string
-		checkOpts            *cosign.CheckOpts
+		checkOpts            *CheckOpts
 		artifactPolicyOption verify.ArtifactPolicyOption
 		entity               verify.SignedEntity
 		wantErr              bool
 	}{
 		{
 			name: "valid",
-			checkOpts: &cosign.CheckOpts{
+			checkOpts: &CheckOpts{
 				Identities:          standardIdentities,
 				IgnoreSCT:           true,
 				UseSignedTimestamps: true,
@@ -111,7 +179,7 @@ func TestVerifyBundle(t *testing.T) {
 		},
 		{
 			name: "valid blob signature",
-			checkOpts: &cosign.CheckOpts{
+			checkOpts: &CheckOpts{
 				Identities:          standardIdentities,
 				IgnoreSCT:           true,
 				UseSignedTimestamps: true,
@@ -123,7 +191,7 @@ func TestVerifyBundle(t *testing.T) {
 		},
 		{
 			name: "invalid, wrong artifact",
-			checkOpts: &cosign.CheckOpts{
+			checkOpts: &CheckOpts{
 				Identities:          standardIdentities,
 				IgnoreSCT:           true,
 				UseSignedTimestamps: true,
@@ -135,7 +203,7 @@ func TestVerifyBundle(t *testing.T) {
 		},
 		{
 			name: "invalid blob signature, wrong artifact",
-			checkOpts: &cosign.CheckOpts{
+			checkOpts: &CheckOpts{
 				Identities:          standardIdentities,
 				IgnoreSCT:           true,
 				UseSignedTimestamps: true,
@@ -147,8 +215,8 @@ func TestVerifyBundle(t *testing.T) {
 		},
 		{
 			name: "valid, pattern match issuer",
-			checkOpts: &cosign.CheckOpts{
-				Identities: []cosign.Identity{
+			checkOpts: &CheckOpts{
+				Identities: []Identity{
 					{
 						IssuerRegExp: ".*issuer",
 						Subject:      "foo@example.com",
@@ -164,8 +232,8 @@ func TestVerifyBundle(t *testing.T) {
 		},
 		{
 			name: "valid, pattern match subject",
-			checkOpts: &cosign.CheckOpts{
-				Identities: []cosign.Identity{
+			checkOpts: &CheckOpts{
+				Identities: []Identity{
 					{
 						Issuer:        "example issuer",
 						SubjectRegExp: ".*@example.com",
@@ -181,8 +249,8 @@ func TestVerifyBundle(t *testing.T) {
 		},
 		{
 			name: "invalid, pattern match issuer",
-			checkOpts: &cosign.CheckOpts{
-				Identities: []cosign.Identity{
+			checkOpts: &CheckOpts{
+				Identities: []Identity{
 					{
 						IssuerRegExp: ".* not my issuer",
 						Subject:      "foo@example.com",
@@ -198,8 +266,8 @@ func TestVerifyBundle(t *testing.T) {
 		},
 		{
 			name: "invalid, pattern match subject",
-			checkOpts: &cosign.CheckOpts{
-				Identities: []cosign.Identity{
+			checkOpts: &CheckOpts{
+				Identities: []Identity{
 					{
 						Issuer:        "example issuer",
 						SubjectRegExp: ".*@otherexample.com",
@@ -214,8 +282,69 @@ func TestVerifyBundle(t *testing.T) {
 			wantErr:              true,
 		},
 		{
+			name: "invalid, exact issuer mismatch",
+			checkOpts: &CheckOpts{
+				Identities: []Identity{
+					{
+						Issuer:  "other issuer",
+						Subject: identity,
+					},
+				},
+				IgnoreSCT:           true,
+				UseSignedTimestamps: true,
+				TrustedMaterial:     virtualSigstore,
+			},
+			artifactPolicyOption: verify.WithArtifact(bytes.NewReader(artifact)),
+			entity:               attestation,
+			wantErr:              true,
+		},
+		{
+			name: "invalid, exact subject mismatch",
+			checkOpts: &CheckOpts{
+				Identities: []Identity{
+					{
+						Issuer:  issuer,
+						Subject: "bar@example.com",
+					},
+				},
+				IgnoreSCT:           true,
+				UseSignedTimestamps: true,
+				TrustedMaterial:     virtualSigstore,
+			},
+			artifactPolicyOption: verify.WithArtifact(bytes.NewReader(artifact)),
+			entity:               attestation,
+			wantErr:              true,
+		},
+		{
+			name: "invalid, multiple identities",
+			checkOpts: &CheckOpts{
+				Identities: []Identity{
+					{Issuer: issuer, Subject: identity},
+					{Issuer: issuer, Subject: "bar@example.com"},
+				},
+				IgnoreSCT:           true,
+				UseSignedTimestamps: true,
+				TrustedMaterial:     virtualSigstore,
+			},
+			artifactPolicyOption: verify.WithArtifact(bytes.NewReader(artifact)),
+			entity:               attestation,
+			wantErr:              true,
+		},
+		{
+			name: "require SCT, missing SCT",
+			checkOpts: &CheckOpts{
+				Identities:          standardIdentities,
+				IgnoreSCT:           false, // VirtualSigstore leaf certs have no SCT
+				UseSignedTimestamps: true,
+				TrustedMaterial:     virtualSigstore,
+			},
+			artifactPolicyOption: verify.WithArtifact(bytes.NewReader(artifact)),
+			entity:               attestation,
+			wantErr:              true,
+		},
+		{
 			name: "invalid trusted material",
-			checkOpts: &cosign.CheckOpts{
+			checkOpts: &CheckOpts{
 				Identities:      standardIdentities,
 				IgnoreSCT:       true,
 				TrustedMaterial: virtualSigstore2,
@@ -226,7 +355,7 @@ func TestVerifyBundle(t *testing.T) {
 		},
 		{
 			name: "do not require tlog, missing tlog",
-			checkOpts: &cosign.CheckOpts{
+			checkOpts: &CheckOpts{
 				Identities:          standardIdentities,
 				IgnoreSCT:           true,
 				IgnoreTlog:          true,
@@ -239,7 +368,7 @@ func TestVerifyBundle(t *testing.T) {
 		},
 		{
 			name: "do not require tsa, missing tsa",
-			checkOpts: &cosign.CheckOpts{
+			checkOpts: &CheckOpts{
 				Identities:          standardIdentities,
 				IgnoreSCT:           true,
 				IgnoreTlog:          false,
@@ -252,7 +381,7 @@ func TestVerifyBundle(t *testing.T) {
 		},
 		{
 			name: "require tlog, missing tlog",
-			checkOpts: &cosign.CheckOpts{
+			checkOpts: &CheckOpts{
 				Identities:          standardIdentities,
 				IgnoreSCT:           true,
 				UseSignedTimestamps: true,
@@ -263,8 +392,21 @@ func TestVerifyBundle(t *testing.T) {
 			wantErr:              true,
 		},
 		{
+			name: "require SET, missing set",
+			checkOpts: &CheckOpts{
+				Identities:          standardIdentities,
+				IgnoreSCT:           true,
+				IgnoreTlog:          false,
+				UseSignedTimestamps: false, // both set to false requires a SET
+				TrustedMaterial:     virtualSigstore,
+			},
+			artifactPolicyOption: verify.WithArtifact(bytes.NewReader(artifact)),
+			entity:               &bundleMutator{SignedEntity: attestation, eraseSET: true},
+			wantErr:              true,
+		},
+		{
 			name: "require tsa, missing tsa",
-			checkOpts: &cosign.CheckOpts{
+			checkOpts: &CheckOpts{
 				Identities:          standardIdentities,
 				IgnoreSCT:           true,
 				UseSignedTimestamps: true,
@@ -274,9 +416,187 @@ func TestVerifyBundle(t *testing.T) {
 			entity:               &bundleMutator{SignedEntity: attestation, eraseTSA: true},
 			wantErr:              true,
 		},
+		{
+			name: "invalid blob signature, wrong Fulcio root",
+			checkOpts: &CheckOpts{
+				Identities:          standardIdentities,
+				IgnoreSCT:           true,
+				UseSignedTimestamps: true,
+				TrustedMaterial:     wrongFulcioRoot,
+			},
+			artifactPolicyOption: verify.WithArtifact(bytes.NewReader(artifact)),
+			entity:               blobSig,
+			wantErr:              true,
+		},
+		{
+			name: "invalid blob signature, integrated time outside certificate validity",
+			checkOpts: &CheckOpts{
+				Identities:          standardIdentities,
+				IgnoreSCT:           true,
+				UseSignedTimestamps: false,
+				TrustedMaterial:     virtualSigstore,
+			},
+			artifactPolicyOption: verify.WithArtifact(bytes.NewReader(artifact)),
+			entity:               expiredBlobSig,
+			wantErr:              true,
+		},
+		{
+			name: "valid blob signature, integrated time outside certificate validity, tlog ignored",
+			checkOpts: &CheckOpts{
+				Identities:          standardIdentities,
+				IgnoreSCT:           true,
+				IgnoreTlog:          true,
+				UseSignedTimestamps: true, // TSA timestamp is within certificate validity
+				TrustedMaterial:     virtualSigstore,
+			},
+			artifactPolicyOption: verify.WithArtifact(bytes.NewReader(artifact)),
+			entity:               &bundleMutator{SignedEntity: expiredBlobSig, eraseTlog: true},
+			wantErr:              false,
+		},
+		{
+			name: "invalid blob signature, corrupted SET",
+			checkOpts: &CheckOpts{
+				Identities:          standardIdentities,
+				IgnoreSCT:           true,
+				UseSignedTimestamps: false,
+				TrustedMaterial:     virtualSigstore,
+			},
+			artifactPolicyOption: verify.WithArtifact(bytes.NewReader(artifact)),
+			entity:               &bundleMutator{SignedEntity: blobSig, corruptSET: true},
+			wantErr:              true,
+		},
+		{
+			name: "invalid blob signature, tlog entry from different signing event",
+			checkOpts: &CheckOpts{
+				Identities:          standardIdentities,
+				IgnoreSCT:           true,
+				UseSignedTimestamps: true,
+				TrustedMaterial:     virtualSigstore,
+			},
+			artifactPolicyOption: verify.WithArtifact(bytes.NewReader(artifact)),
+			entity:               &bundleMutator{SignedEntity: blobSig, tlogOverride: otherTlogEntries},
+			wantErr:              true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err = cosign.VerifyNewBundle(context.Background(), tc.checkOpts, tc.artifactPolicyOption, tc.entity)
+			_, err = VerifyNewBundle(context.Background(), tc.checkOpts, tc.artifactPolicyOption, tc.entity)
+			if tc.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestVerifyBundleGitHubWorkflowExtensions(t *testing.T) {
+	const (
+		subject    = "foo@example.com"
+		oidcIssuer = "https://token.actions.githubusercontent.com"
+		trigger    = "push"
+		sha        = "0123456789abcdef0123456789abcdef01234567"
+		name       = "release"
+		repository = "sigstore/cosign"
+		ref        = "refs/heads/main"
+	)
+
+	// VirtualSigstore cannot issue certificates with custom extensions, so this
+	// test uses its own CA to issue a leaf with the GitHub workflow OIDs.
+	rootCert, rootKey, err := test.GenerateRootCa()
+	assert.NoError(t, err)
+	leafCert, leafKey, err := test.GenerateLeafCertWithGitHubOIDs(subject, oidcIssuer,
+		trigger, sha, name, repository, ref, rootCert, rootKey)
+	assert.NoError(t, err)
+
+	artifact := []byte("artifact")
+	digest := sha256.Sum256(artifact)
+	sig, err := ecdsa.SignASN1(rand.Reader, leafKey, digest[:])
+	assert.NoError(t, err)
+
+	b, err := sgbundle.NewBundle(&protobundle.Bundle{
+		MediaType: "application/vnd.dev.sigstore.bundle+json;version=0.3",
+		VerificationMaterial: &protobundle.VerificationMaterial{
+			Content: &protobundle.VerificationMaterial_Certificate{
+				Certificate: &protocommon.X509Certificate{RawBytes: leafCert.Raw},
+			},
+		},
+		Content: &protobundle.Bundle_MessageSignature{
+			MessageSignature: &protocommon.MessageSignature{
+				MessageDigest: &protocommon.HashOutput{
+					Algorithm: protocommon.HashAlgorithm_SHA2_256,
+					Digest:    digest[:],
+				},
+				Signature: sig,
+			},
+		},
+	})
+	assert.NoError(t, err)
+
+	trustedMaterial := &fulcioOverrideTrustedMaterial{
+		TrustedMaterial: &root.BaseTrustedMaterial{},
+		cas:             []root.CertificateAuthority{&root.FulcioCertificateAuthority{Root: rootCert}},
+	}
+
+	newCheckOpts := func(mutate func(co *CheckOpts)) *CheckOpts {
+		co := &CheckOpts{
+			Identities:      []Identity{{Issuer: oidcIssuer, Subject: subject}},
+			IgnoreSCT:       true,
+			IgnoreTlog:      true,
+			TrustedMaterial: trustedMaterial,
+		}
+		if mutate != nil {
+			mutate(co)
+		}
+		return co
+	}
+
+	for _, tc := range []struct {
+		name      string
+		checkOpts *CheckOpts
+		wantErr   bool
+	}{
+		{
+			name:      "valid, no extensions required",
+			checkOpts: newCheckOpts(nil),
+		},
+		{
+			name: "valid, all extensions match",
+			checkOpts: newCheckOpts(func(co *CheckOpts) {
+				co.CertGithubWorkflowTrigger = trigger
+				co.CertGithubWorkflowSha = sha
+				co.CertGithubWorkflowName = name
+				co.CertGithubWorkflowRepository = repository
+				co.CertGithubWorkflowRef = ref
+			}),
+		},
+		{
+			name:      "invalid, workflow trigger mismatch",
+			checkOpts: newCheckOpts(func(co *CheckOpts) { co.CertGithubWorkflowTrigger = "pull_request" }),
+			wantErr:   true,
+		},
+		{
+			name:      "invalid, workflow sha mismatch",
+			checkOpts: newCheckOpts(func(co *CheckOpts) { co.CertGithubWorkflowSha = "wrongsha" }),
+			wantErr:   true,
+		},
+		{
+			name:      "invalid, workflow name mismatch",
+			checkOpts: newCheckOpts(func(co *CheckOpts) { co.CertGithubWorkflowName = "wrongname" }),
+			wantErr:   true,
+		},
+		{
+			name:      "invalid, workflow repository mismatch",
+			checkOpts: newCheckOpts(func(co *CheckOpts) { co.CertGithubWorkflowRepository = "other/repo" }),
+			wantErr:   true,
+		},
+		{
+			name:      "invalid, workflow ref mismatch",
+			checkOpts: newCheckOpts(func(co *CheckOpts) { co.CertGithubWorkflowRef = "refs/heads/other" }),
+			wantErr:   true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := VerifyNewBundle(context.Background(), tc.checkOpts, verify.WithArtifact(bytes.NewReader(artifact)), b)
 			if tc.wantErr {
 				assert.Error(t, err)
 			} else {
@@ -333,14 +653,14 @@ func TestVerifyBundleWithSigVerifier(t *testing.T) {
 
 	for _, tc := range []struct {
 		name                 string
-		checkOpts            *cosign.CheckOpts
+		checkOpts            *CheckOpts
 		artifactPolicyOption verify.ArtifactPolicyOption
 		entity               verify.SignedEntity
 		wantErr              bool
 	}{
 		{
 			name: "valid",
-			checkOpts: &cosign.CheckOpts{
+			checkOpts: &CheckOpts{
 				UseSignedTimestamps: true,
 				IgnoreTlog:          true,
 				TrustedMaterial:     virtualSigstore,
@@ -352,7 +672,7 @@ func TestVerifyBundleWithSigVerifier(t *testing.T) {
 		},
 		{
 			name: "invalid, wrong artifact",
-			checkOpts: &cosign.CheckOpts{
+			checkOpts: &CheckOpts{
 				UseSignedTimestamps: true,
 				IgnoreTlog:          true,
 				TrustedMaterial:     virtualSigstore,
@@ -364,7 +684,7 @@ func TestVerifyBundleWithSigVerifier(t *testing.T) {
 		},
 		{
 			name: "invalid, sigverifier not set",
-			checkOpts: &cosign.CheckOpts{
+			checkOpts: &CheckOpts{
 				UseSignedTimestamps: true,
 				IgnoreTlog:          true,
 				TrustedMaterial:     virtualSigstore,
@@ -375,12 +695,216 @@ func TestVerifyBundleWithSigVerifier(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err = cosign.VerifyNewBundle(context.Background(), tc.checkOpts, tc.artifactPolicyOption, tc.entity)
+			_, err = VerifyNewBundle(context.Background(), tc.checkOpts, tc.artifactPolicyOption, tc.entity)
 			if tc.wantErr {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
 			}
+		})
+	}
+}
+
+func TestCheckOptsBundleOptions(t *testing.T) {
+	testCases := []struct {
+		name                  string
+		allowCertificateChain bool
+		wantOpts              int
+	}{
+		{
+			name:                  "default returns no options",
+			allowCertificateChain: false,
+			wantOpts:              0,
+		},
+		{
+			name:                  "AllowCertificateChain adds option",
+			allowCertificateChain: true,
+			wantOpts:              1,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			co := &CheckOpts{AllowCertificateChain: tc.allowCertificateChain}
+			if got := len(co.BundleOptions()); got != tc.wantOpts {
+				t.Errorf("expected %d options, got %d", tc.wantOpts, got)
+			}
+		})
+	}
+}
+
+type mockSignedEntity struct {
+	verify.SignedEntity
+	tlogEntries []*tlog.Entry
+}
+
+func (m *mockSignedEntity) TlogEntries() ([]*tlog.Entry, error) {
+	return m.tlogEntries, nil
+}
+
+type mockVerifierForBundle struct{}
+
+func (m *mockVerifierForBundle) PublicKey(_ ...signature.PublicKeyOption) (crypto.PublicKey, error) {
+	return nil, nil
+}
+
+func (m *mockVerifierForBundle) VerifySignature(_, _ io.Reader, _ ...signature.VerifyOption) error {
+	return nil
+}
+
+func makeTlogEntry(t *testing.T, integratedTime int64) *tlog.Entry {
+	body := []byte(`{
+		"kind": "hashedrekord",
+		"apiVersion": "0.0.1",
+		"spec": {
+			"signature": {
+				"content": "MEQCIFrwIdVX8n5RM+Fy9fgCmaBc20jmksfL0XL08y1zx3XpAiB95HkXz37kTUzdykwuNStwCc5B9NKHtioD+3GYMuWU/w==",
+				"publicKey": {"content": "LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUZrd0V3WUhLb1pJemowQ0FRWUlLb1pJemowREFRY0RRZ0FFNHlQQ080MStjeGxEdENBUndTNDNvQU1YVWs3NApyWGZ5eGhKSldJZ05KbTUyTlppZllHaDNnYzNaakJVOVJhRXJLb0NidGVxdW1IWU9CSnN6RmNIUGFBPT0KLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg=="}
+			},
+			"data": {
+				"hash": {"algorithm": "sha256", "value": "0c0f699f002f4de2ab43b04a0c930ceb57be35d2c81b31648d88b021713e9477"}
+			}
+		}
+	}`)
+	tle := &v1.TransparencyLogEntry{
+		LogIndex: 1,
+		LogId: &protocommon.LogId{
+			KeyId: []byte("ignored"),
+		},
+		KindVersion: &v1.KindVersion{
+			Kind:    "ignored",
+			Version: "ignored",
+		},
+		IntegratedTime:    integratedTime,
+		CanonicalizedBody: body,
+	}
+	entry, err := tlog.NewTlogEntry(tle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entry
+}
+
+// rekorV2Entity wraps a real SignedEntity but reports caller-supplied tlog
+// entries, letting a test force the Rekor v2 code path (an entry with no
+// integrated time) that makes rekorV2Bundle write co.UseSignedTimestamps.
+type rekorV2Entity struct {
+	verify.SignedEntity
+	entries []*tlog.Entry
+}
+
+func (e *rekorV2Entity) TlogEntries() ([]*tlog.Entry, error) {
+	return e.entries, nil
+}
+
+// TestVerifyNewBundleConcurrentNoDataRace guards against the data race where the
+// attestation verification fan-out shares one *CheckOpts across goroutines:
+// VerifyNewBundle -> rekorV2Bundle writes co.UseSignedTimestamps for a Rekor v2
+// bundle while sibling goroutines read it in co.verificationOptions(). Run with
+// -race; without VerifyNewBundle copying co, the detector fires.
+func TestVerifyNewBundleConcurrentNoDataRace(t *testing.T) {
+	virtualSigstore, err := ca.NewVirtualSigstore()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	artifact := []byte("artifact")
+	digest := sha256.Sum256(artifact)
+	digestHex := hex.EncodeToString(digest[:])
+	statement := []byte(fmt.Sprintf(`{"_type":"https://in-toto.io/Statement/v0.1","predicateType":"https://example.com/predicateType","subject":[{"name":"subject","digest":{"sha256":"%s"}}],"predicate":{}}`, digestHex))
+	attestation, err := virtualSigstore.Attest("foo@example.com", "example issuer", statement)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Report a single Rekor v2 entry (zero integrated time, no v1 entry) so
+	// rekorV2Bundle sets co.UseSignedTimestamps during verification.
+	bundle := &rekorV2Entity{SignedEntity: attestation, entries: []*tlog.Entry{makeTlogEntry(t, 0)}}
+
+	// One *CheckOpts shared across goroutines, exactly as verifyImageAttestationsSigstoreBundle shares it.
+	co := &CheckOpts{
+		Identities:      []Identity{{Issuer: "example issuer", Subject: "foo@example.com"}},
+		IgnoreSCT:       true,
+		TrustedMaterial: virtualSigstore,
+	}
+	artifactPolicyOption := verify.WithArtifact(bytes.NewReader(artifact))
+
+	const goroutines = 50
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			<-start // release all goroutines together to widen the race window
+			// Verification against the synthetic tlog entry is expected to fail;
+			// the test only asserts the concurrent calls don't race on co.
+			_, _ = VerifyNewBundle(context.Background(), co, artifactPolicyOption, bundle)
+		}()
+	}
+	close(start)
+	wg.Wait()
+}
+
+func TestRekorV2Bundle(t *testing.T) {
+	rekorV1Entry := makeTlogEntry(t, 1234567890)
+	rekorV2Entry := makeTlogEntry(t, 0)
+
+	tests := []struct {
+		name                        string
+		co                          *CheckOpts
+		entries                     []*tlog.Entry
+		expectedUseSignedTimestamps bool
+	}{
+		{
+			name: "IgnoreTlog true",
+			co: &CheckOpts{
+				IgnoreTlog: true,
+			},
+			entries:                     []*tlog.Entry{rekorV2Entry},
+			expectedUseSignedTimestamps: false,
+		},
+		{
+			name: "SigVerifier set",
+			co: &CheckOpts{
+				SigVerifier: &mockVerifierForBundle{},
+			},
+			entries:                     []*tlog.Entry{rekorV2Entry},
+			expectedUseSignedTimestamps: false,
+		},
+		{
+			name:                        "Rekor v1 entry",
+			co:                          &CheckOpts{},
+			entries:                     []*tlog.Entry{rekorV1Entry},
+			expectedUseSignedTimestamps: false,
+		},
+		{
+			name:                        "Rekor v2 entry",
+			co:                          &CheckOpts{},
+			entries:                     []*tlog.Entry{rekorV2Entry},
+			expectedUseSignedTimestamps: true,
+		},
+		{
+			name:                        "Mixed entries",
+			co:                          &CheckOpts{},
+			entries:                     []*tlog.Entry{rekorV1Entry, rekorV2Entry},
+			expectedUseSignedTimestamps: false,
+		},
+		{
+			name: "Already set with Rekor v1",
+			co: &CheckOpts{
+				UseSignedTimestamps: true,
+			},
+			entries:                     []*tlog.Entry{rekorV1Entry},
+			expectedUseSignedTimestamps: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			bundle := &mockSignedEntity{tlogEntries: tc.entries}
+			err := rekorV2Bundle(bundle, tc.co)
+			assert.NoError(t, err)
+			assert.Equal(t, tc.expectedUseSignedTimestamps, tc.co.UseSignedTimestamps)
 		})
 	}
 }

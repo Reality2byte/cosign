@@ -28,8 +28,8 @@ import (
 	"syscall"
 
 	"github.com/miekg/pkcs11"
-	"github.com/sigstore/cosign/v2/pkg/cosign/env"
-	"github.com/sigstore/cosign/v2/pkg/cosign/pkcs11key"
+	"github.com/sigstore/cosign/v3/pkg/cosign/env"
+	"github.com/sigstore/cosign/v3/pkg/cosign/pkcs11key"
 	"golang.org/x/term"
 )
 
@@ -97,6 +97,13 @@ func GetKeysInfo(_ context.Context, modulePath string, slotID uint, pin string) 
 	}
 	defer ctx.Destroy()
 	defer ctx.Finalize()
+
+	// YKCS11 (Yubico's pkcs#11 library) requires this to initialize correctly
+	// See https://github.com/Yubico/yubico-piv-tool/issues/571
+	_, err = ctx.GetSlotList(true)
+	if err != nil {
+		return nil, fmt.Errorf("error getting slot list %w", err)
+	}
 
 	// Get token Info.
 	var tokenInfo pkcs11.TokenInfo

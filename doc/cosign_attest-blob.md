@@ -1,6 +1,6 @@
 ## cosign attest-blob
 
-Attest the supplied blob.
+Attest the supplied blob
 
 ```
 cosign attest-blob [flags]
@@ -11,8 +11,8 @@ cosign attest-blob [flags]
 ```
   cosign attest-blob --key <key path>|<kms uri> [--predicate <path>] [--a key=value] [--f] [--r] <BLOB uri>
 
-  # attach an attestation to a blob with a local key pair file and print the attestation
-  cosign attest-blob --predicate <FILE> --type <TYPE> --key cosign.key --output-attestation <path> <BLOB>
+  # attach an attestation to a blob with a local key pair file and write the bundle to a file
+  cosign attest-blob --predicate <FILE> --type <TYPE> --key cosign.key --bundle <path> <BLOB>
 
   # attach an attestation to a blob with a key pair stored in Azure Key Vault
   cosign attest-blob --predicate <FILE> --type <TYPE> --key azurekms://[VAULT_NAME][VAULT_URI]/[KEY] <BLOB>
@@ -33,41 +33,31 @@ cosign attest-blob [flags]
 ### Options
 
 ```
-      --bundle string                     write everything required to verify the blob to a FILE
-      --certificate string                path to the X.509 certificate in PEM format to include in the OCI Signature
-      --certificate-chain string          path to a list of CA X.509 certificates in PEM format which will be needed when building the certificate chain for the signing certificate. Must start with the parent intermediate CA certificate of the signing certificate and end with the root certificate. Included in the OCI Signature
-      --fulcio-auth-flow string           fulcio interactive oauth2 flow to use for certificate from fulcio. Defaults to determining the flow based on the runtime environment. (options) normal|device|token|client_credentials
-      --fulcio-url string                 address of sigstore PKI server (default "https://fulcio.sigstore.dev")
-      --hash string                       hash of blob in hexadecimal (base16). Used if you want to sign an artifact stored elsewhere and have the hash
-  -h, --help                              help for attest-blob
-      --identity-token string             identity token to use for certificate from fulcio. the token or a path to a file containing the token is accepted.
-      --insecure-skip-verify              skip verifying fulcio published to the SCT (this should only be used for testing).
-      --key string                        path to the private key file, KMS URI or Kubernetes Secret
-      --new-bundle-format                 output bundle in new format that contains all verification material
-      --oidc-client-id string             OIDC client ID for application (default "sigstore")
-      --oidc-client-secret-file string    Path to file containing OIDC client secret for application
-      --oidc-disable-ambient-providers    Disable ambient OIDC providers. When true, ambient credentials will not be read
-      --oidc-issuer string                OIDC provider to be used to issue ID token (default "https://oauth2.sigstore.dev/auth")
-      --oidc-provider string              Specify the provider to get the OIDC token from (Optional). If unset, all options will be tried. Options include: [spiffe, google, github-actions, filesystem, buildkite-agent]
-      --oidc-redirect-url string          OIDC redirect URL (Optional). The default oidc-redirect-url is 'http://localhost:0/auth/callback'.
-      --output-attestation string         write the attestation to FILE
-      --output-certificate string         write the certificate to FILE
-      --output-signature string           write the signature to FILE
-      --predicate string                  path to the predicate file.
-      --rekor-entry-type string           specifies the type to be used for a rekor entry upload (dsse|intoto) (default "dsse")
-      --rekor-url string                  address of rekor STL server (default "https://rekor.sigstore.dev")
-      --rfc3161-timestamp-bundle string   path to an RFC 3161 timestamp bundle FILE
-      --sk                                whether to use a hardware security key
-      --slot string                       security key slot to use for generated key (default: signature) (authentication|signature|card-authentication|key-management)
-      --statement string                  path to the statement file.
-      --timestamp-client-cacert string    path to the X.509 CA certificate file in PEM format to be used for the connection to the TSA Server
-      --timestamp-client-cert string      path to the X.509 certificate file in PEM format to be used for the connection to the TSA Server
-      --timestamp-client-key string       path to the X.509 private key file in PEM format to be used, together with the 'timestamp-client-cert' value, for the connection to the TSA Server
-      --timestamp-server-name string      SAN name to use as the 'ServerName' tls.Config field to verify the mTLS connection to the TSA Server
-      --timestamp-server-url string       url to the Timestamp RFC3161 server, default none. Must be the path to the API to request timestamp responses, e.g. https://freetsa.org/tsr
-      --tlog-upload                       whether or not to upload to the tlog (default true)
-      --type string                       specify a predicate type (slsaprovenance|slsaprovenance02|slsaprovenance1|link|spdx|spdxjson|cyclonedx|vuln|openvex|custom) or an URI (default "custom")
-  -y, --yes                               skip confirmation prompts for non-destructive operations
+      --bundle string                    write everything required to verify the blob to a FILE
+      --certificate string               path to the X.509 certificate for signing attestation
+      --certificate-chain string         path to a list of CA X.509 certificates in PEM format which will be needed when building the certificate chain for the signed attestation. Must start with the parent intermediate CA certificate of the signing certificate and end with the root certificate.
+      --fulcio-auth-flow string          fulcio interactive oauth2 flow to use for certificate from fulcio. Defaults to determining the flow based on the runtime environment. (options) normal|device|token|client_credentials
+      --hash string                      hash of blob in hexadecimal (base16). Used if you want to sign an artifact stored elsewhere and have the hash
+  -h, --help                             help for attest-blob
+      --identity-token string            identity token to use for certificate from fulcio. the token or a path to a file containing the token is accepted.
+      --key string                       path to the private key file, KMS URI or Kubernetes Secret
+      --oidc-client-id string            OIDC client ID for application (default "sigstore")
+      --oidc-client-secret-file string   Path to file containing OIDC client secret for application
+      --oidc-disable-ambient-providers   Disable ambient OIDC providers. When true, ambient credentials will not be read
+      --oidc-provider string             Specify the provider to get the OIDC token from (Optional). If unset, all options will be tried. Options include: [spiffe, google, github-actions, filesystem, buildkite-agent]
+      --oidc-redirect-url string         OIDC redirect URL (Optional). The default oidc-redirect-url is 'http://localhost:0/auth/callback'.
+      --predicate string                 path to the predicate file.
+      --signing-config string            path to a signing config file. Must provide --bundle, which will output verification material in the new format
+      --sk                               whether to use a hardware security key
+      --slot string                      security key slot to use for generated key (default: signature) (authentication|signature|card-authentication|key-management)
+      --statement string                 path to the statement file.
+      --timestamp-client-cacert string   path to the X.509 CA certificate file in PEM format to be used for the connection to the TSA Server
+      --timestamp-client-cert string     path to the X.509 certificate file in PEM format to be used for the connection to the TSA Server
+      --timestamp-client-key string      path to the X.509 private key file in PEM format to be used, together with the 'timestamp-client-cert' value, for the connection to the TSA Server
+      --timestamp-server-name string     SAN name to use as the 'ServerName' tls.Config field to verify the mTLS connection to the TSA Server
+      --trusted-root string              optional path to a TrustedRoot JSON file to verify a signature after signing
+      --type string                      specify a predicate type (slsaprovenance|slsaprovenance02|slsaprovenance1|link|spdx|spdxjson|cyclonedx|vuln|openvex|custom) or an URI (default "custom")
+  -y, --yes                              skip confirmation prompts for non-destructive operations
 ```
 
 ### Options inherited from parent commands
@@ -80,5 +70,5 @@ cosign attest-blob [flags]
 
 ### SEE ALSO
 
-* [cosign](cosign.md)	 - A tool for Container Signing, Verification and Storage in an OCI registry.
+* [cosign](cosign.md)	 - A tool for Container Signing, Verification and Storage in an OCI registry
 

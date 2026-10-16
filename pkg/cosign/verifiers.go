@@ -22,10 +22,10 @@ import (
 	"fmt"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/in-toto/in-toto-golang/in_toto"
 	"github.com/secure-systems-lab/go-securesystemslib/dsse"
 
-	"github.com/sigstore/cosign/v2/pkg/oci"
+	"github.com/sigstore/cosign/v3/pkg/cosign/attestation"
+	"github.com/sigstore/cosign/v3/pkg/oci"
 	"github.com/sigstore/sigstore/pkg/signature/payload"
 )
 
@@ -56,7 +56,7 @@ func SimpleClaimVerifier(sig oci.Signature, imageDigest v1.Hash, annotations map
 }
 
 // IntotoSubjectClaimVerifier verifies that sig.Payload() is an Intoto statement which references the given image digest.
-func IntotoSubjectClaimVerifier(sig oci.Signature, imageDigest v1.Hash, _ map[string]interface{}) error {
+func IntotoSubjectClaimVerifier(sig oci.Signature, imageDigest v1.Hash, annotations map[string]interface{}) error {
 	p, err := sig.Payload()
 	if err != nil {
 		return err
@@ -72,19 +72,26 @@ func IntotoSubjectClaimVerifier(sig oci.Signature, imageDigest v1.Hash, _ map[st
 		return err
 	}
 
-	st := in_toto.Statement{}
-	if err := json.Unmarshal(stBytes, &st); err != nil {
+	st := &attestation.Statement{}
+	if err := st.UnmarshalJSON(stBytes); err != nil {
 		return err
 	}
 	for _, subj := range st.Subject {
+		if subj == nil {
+			return errors.New("invalid in-toto statement: null subject entry")
+		}
 		dgst, ok := subj.Digest["sha256"]
 		if !ok {
 			continue
 		}
 		subjDigest := "sha256:" + dgst
-		if subjDigest == imageDigest.String() {
-			return nil
+		if subjDigest != imageDigest.String() {
+			continue
 		}
+		if !correctAnnotations(annotations, subj.Annotations.AsMap()) {
+			return errors.New("missing or incorrect annotation")
+		}
+		return nil
 	}
 	return errors.New("no matching subject digest found")
 }

@@ -18,14 +18,15 @@ import (
 	"bytes"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/types"
-	"github.com/sigstore/cosign/v2/pkg/cosign/bundle"
-	"github.com/sigstore/cosign/v2/pkg/oci"
-	"github.com/sigstore/cosign/v2/pkg/oci/static"
+	"github.com/sigstore/cosign/v3/pkg/cosign/bundle"
+	"github.com/sigstore/cosign/v3/pkg/oci"
+	"github.com/sigstore/cosign/v3/pkg/oci/static"
 	"github.com/sigstore/sigstore/pkg/cryptoutils"
 )
 
@@ -189,6 +190,9 @@ func Signature(original oci.Signature, opts ...SignatureOption) (oci.Signature, 
 		certs, err := cryptoutils.LoadCertificatesFromPEM(bytes.NewReader(so.cert))
 		if err != nil {
 			return nil, err
+		}
+		if len(certs) == 0 {
+			return nil, errors.New("no certificates found in the provided certificate PEM")
 		}
 		newAnn[static.CertificateAnnotationKey] = string(so.cert)
 		cert = certs[0]

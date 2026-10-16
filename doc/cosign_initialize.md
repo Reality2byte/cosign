@@ -1,6 +1,6 @@
 ## cosign initialize
 
-Initializes SigStore root to retrieve trusted certificate and key targets for verification.
+Initializes SigStore root to retrieve trusted certificate and key targets for verification
 
 ### Synopsis
 
@@ -16,7 +16,7 @@ This will enable you to point cosign to a separate TUF root.
 Any updated TUF repository will be written to $HOME/.sigstore/root/.
 
 Trusted keys and certificate used in cosign verification (e.g. verifying Fulcio issued certificates
-with Fulcio root CA) are pulled form the trusted metadata.
+with Fulcio root CA) are pulled from the trusted metadata.
 
 ```
 cosign initialize [flags]
@@ -25,10 +25,13 @@ cosign initialize [flags]
 ### Examples
 
 ```
-cosign initialize --mirror <url> --out <file>
+cosign initialize --mirror <url>
 
-# initialize root with distributed root keys, default mirror, and default out path.
+# initialize root with distributed root keys, using the default mirror.
 cosign initialize
+
+# initialize root with distributed root keys, using the staging mirror.
+cosign initialize --staging
 
 # initialize with an out-of-band root key file, using the default mirror.
 cosign initialize --root <url>
@@ -47,6 +50,7 @@ cosign initialize --mirror <url> --root <url> --root-checksum <sha256>
       --mirror string          GCS bucket to a SigStore TUF repository, or HTTP(S) base URL, or file:/// for local filestore remote (air-gap) (default "https://tuf-repo-cdn.sigstore.dev")
       --root string            path to trusted initial root. defaults to embedded root
       --root-checksum string   checksum of the initial root, required if root is downloaded via http(s). expects sha256 by default, can be changed to sha512 by providing sha512:<checksum>
+      --staging                use the staging TUF repository
 ```
 
 ### Options inherited from parent commands
@@ -59,5 +63,5 @@ cosign initialize --mirror <url> --root <url> --root-checksum <sha256>
 
 ### SEE ALSO
 
-* [cosign](cosign.md)	 - A tool for Container Signing, Verification and Storage in an OCI registry.
+* [cosign](cosign.md)	 - A tool for Container Signing, Verification and Storage in an OCI registry
 

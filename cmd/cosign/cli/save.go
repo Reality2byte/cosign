@@ -21,10 +21,10 @@ import (
 	"fmt"
 
 	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
-	"github.com/sigstore/cosign/v2/pkg/oci"
-	"github.com/sigstore/cosign/v2/pkg/oci/layout"
-	ociremote "github.com/sigstore/cosign/v2/pkg/oci/remote"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/options"
+	"github.com/sigstore/cosign/v3/pkg/oci"
+	"github.com/sigstore/cosign/v3/pkg/oci/layout"
+	ociremote "github.com/sigstore/cosign/v3/pkg/oci/remote"
 	"github.com/spf13/cobra"
 )
 
@@ -33,7 +33,7 @@ func Save() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:              "save",
-		Short:            "Save the container image and associated signatures to disk at the specified directory.",
+		Short:            "Save the container image and associated signatures to disk at the specified directory",
 		Long:             "Save the container image and associated signatures to disk at the specified directory.",
 		Example:          `  cosign save --dir <path to directory> <IMAGE>`,
 		Args:             cobra.ExactArgs(1),
@@ -57,6 +57,36 @@ func SaveCmd(ctx context.Context, opts options.SaveOptions, imageRef string) err
 	ref, err := name.ParseReference(imageRef, opts.Registry.NameOptions()...)
 	if err != nil {
 		return fmt.Errorf("parsing image name %s: %w", imageRef, err)
+	}
+
+	// See if we are using referrers
+	digest, ok := ref.(name.Digest)
+	if !ok {
+		var err error
+		digest, err = ociremote.ResolveDigest(ref, regClientOpts...)
+		if err != nil {
+			return fmt.Errorf("resolving digest: %w", err)
+		}
+	}
+
+	indexManifest, err := ociremote.Referrers(digest, "", regClientOpts...)
+	if err != nil {
+		return fmt.Errorf("getting referrers: %w", err)
+	}
+
+	for _, manifest := range indexManifest.Manifests {
+		if manifest.ArtifactType == "" {
+			continue
+		}
+		artifactRef := ref.Context().Digest(manifest.Digest.String())
+		si, err := ociremote.SignedImage(artifactRef, regClientOpts...)
+		if err != nil {
+			return fmt.Errorf("getting signed image: %w", err)
+		}
+		err = layout.WriteSignedImage(opts.Directory, si)
+		if err != nil {
+			return err
+		}
 	}
 
 	se, err := ociremote.SignedEntity(ref, regClientOpts...)

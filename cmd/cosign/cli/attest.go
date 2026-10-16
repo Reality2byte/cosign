@@ -16,15 +16,12 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/attest"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/generate"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
-	"github.com/sigstore/cosign/v2/internal/ui"
-	"github.com/sigstore/cosign/v2/pkg/cosign"
-	"github.com/sigstore/cosign/v2/pkg/cosign/env"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/attest"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/generate"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/options"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/signcommon"
 	"github.com/spf13/cobra"
 )
 
@@ -33,7 +30,7 @@ func Attest() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "attest",
-		Short: "Attest the supplied container image.",
+		Short: "Attest the supplied container image",
 		Example: `  cosign attest --key <key path>|<kms uri> [--predicate <path>] [--a key=value] [--no-upload=true|false] [--record-creation-timestamp=true|false] [--f] [--r] <image uri>
 
   # attach an attestation to a container image Google sign-in
@@ -71,42 +68,57 @@ func Attest() *cobra.Command {
 
 		Args:             cobra.MinimumNArgs(1),
 		PersistentPreRun: options.BindViper,
+		PreRunE: func(_ *cobra.Command, args []string) error {
+			if o.NewBundleFormat && o.NoUpload && o.BundlePath == "" {
+				return fmt.Errorf("must enable upload to the OCI registry or specify a local --bundle path with --new-bundle-format")
+			}
+			if o.BundlePath != "" && len(args) > 1 {
+				return fmt.Errorf("cannot use --bundle when attesting multiple images")
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := signcommon.ValidateSigningOptions(cmd.Context(), o.UseSigningConfig, o.SigningConfigPath,
+				o.Rekor.URL, o.Fulcio.URL, o.OIDC.Issuer, o.TSAServerURL,
+				o.TlogUpload, o.NewBundleFormat, o.BundlePath,
+				"", "", "", "", "", ""); err != nil {
+				return err
+			}
+
 			oidcClientSecret, err := o.OIDC.ClientSecret()
 			if err != nil {
 				return err
 			}
 
 			ko := options.KeyOpts{
-				KeyRef:                   o.Key,
-				PassFunc:                 generate.GetPass,
-				Sk:                       o.SecurityKey.Use,
-				Slot:                     o.SecurityKey.Slot,
-				FulcioURL:                o.Fulcio.URL,
-				IDToken:                  o.Fulcio.IdentityToken,
-				FulcioAuthFlow:           o.Fulcio.AuthFlow,
-				InsecureSkipFulcioVerify: o.Fulcio.InsecureSkipFulcioVerify,
-				RekorURL:                 o.Rekor.URL,
-				OIDCIssuer:               o.OIDC.Issuer,
-				OIDCClientID:             o.OIDC.ClientID,
-				OIDCClientSecret:         oidcClientSecret,
-				OIDCRedirectURL:          o.OIDC.RedirectURL,
-				OIDCProvider:             o.OIDC.Provider,
-				SkipConfirmation:         o.SkipConfirmation,
-				TSAClientCACert:          o.TSAClientCACert,
-				TSAClientKey:             o.TSAClientKey,
-				TSAClientCert:            o.TSAClientCert,
-				TSAServerName:            o.TSAServerName,
-				TSAServerURL:             o.TSAServerURL,
-				NewBundleFormat:          o.NewBundleFormat,
+				KeyRef:                         o.Key,
+				PassFunc:                       generate.GetPass,
+				Sk:                             o.SecurityKey.Use,
+				Slot:                           o.SecurityKey.Slot,
+				FulcioURL:                      o.Fulcio.URL,
+				IDToken:                        o.Fulcio.IdentityToken,
+				FulcioAuthFlow:                 o.Fulcio.AuthFlow,
+				RekorURL:                       o.Rekor.URL,
+				OIDCIssuer:                     o.OIDC.Issuer,
+				OIDCClientID:                   o.OIDC.ClientID,
+				OIDCClientSecret:               oidcClientSecret,
+				OIDCRedirectURL:                o.OIDC.RedirectURL,
+				OIDCDisableProviders:           o.OIDC.DisableAmbientProviders,
+				OIDCProvider:                   o.OIDC.Provider,
+				SkipConfirmation:               o.SkipConfirmation,
+				TSAClientCACert:                o.TSAClientCACert,
+				TSAClientKey:                   o.TSAClientKey,
+				TSAClientCert:                  o.TSAClientCert,
+				TSAServerName:                  o.TSAServerName,
+				TSAServerURL:                   o.TSAServerURL,
+				IssueCertificateForExistingKey: o.IssueCertificate,
+				BundlePath:                     o.BundlePath,
+				NewBundleFormat:                o.NewBundleFormat,
 			}
-			if o.Key == "" && env.Getenv(env.VariableSigstoreCTLogPublicKeyFile) == "" { // Get the trusted root if using fulcio for signing
-				trustedMaterial, err := cosign.TrustedRoot()
-				if err != nil {
-					ui.Warnf(context.Background(), "Could not fetch trusted_root.json from the TUF repository. Continuing with individual targets. Error from TUF: %v", err)
-				}
-				ko.TrustedMaterial = trustedMaterial
+			if err := signcommon.LoadSigningConfigAndTrustedMaterial(cmd.Context(), &ko, o.UseSigningConfig, o.SigningConfigPath, o.TrustedRootPath); err != nil {
+				return err
 			}
+
 			attestCommand := attest.AttestCommand{
 				KeyOpts:                 ko,
 				RegistryOptions:         o.Registry,

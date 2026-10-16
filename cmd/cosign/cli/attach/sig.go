@@ -16,6 +16,7 @@
 package attach
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -24,22 +25,16 @@ import (
 	"path/filepath"
 
 	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
-	"github.com/sigstore/cosign/v2/pkg/cosign"
-	"github.com/sigstore/cosign/v2/pkg/cosign/bundle"
-	"github.com/sigstore/cosign/v2/pkg/oci/mutate"
-	ociremote "github.com/sigstore/cosign/v2/pkg/oci/remote"
-	"github.com/sigstore/cosign/v2/pkg/oci/static"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/options"
+	"github.com/sigstore/cosign/v3/pkg/cosign"
+	"github.com/sigstore/cosign/v3/pkg/cosign/bundle"
+	"github.com/sigstore/cosign/v3/pkg/oci/mutate"
+	ociremote "github.com/sigstore/cosign/v3/pkg/oci/remote"
+	"github.com/sigstore/cosign/v3/pkg/oci/static"
+	sgbundle "github.com/sigstore/sigstore-go/pkg/bundle"
 )
 
 func SignatureCmd(ctx context.Context, regOpts options.RegistryOptions, sigRef, payloadRef, certRef, certChainRef, timeStampedSigRef, rekorBundleRef, imageRef string) error {
-	b64SigBytes, err := signatureBytes(sigRef)
-	if err != nil {
-		return err
-	} else if len(b64SigBytes) == 0 {
-		return errors.New("empty signature")
-	}
-
 	ref, err := name.ParseReference(imageRef, regOpts.NameOptions()...)
 	if err != nil {
 		return err
@@ -52,19 +47,28 @@ func SignatureCmd(ctx context.Context, regOpts options.RegistryOptions, sigRef, 
 	if err != nil {
 		return err
 	}
-	// Overwrite "ref" with a digest to avoid a race where we use a tag
-	// multiple times, and it potentially points to different things at
-	// each access.
-	ref = digest // nolint
+
+	// Detect if we are using new bundle format
+	b, err := sgbundle.LoadJSONFromPath(payloadRef)
+	if err == nil {
+		return attachAttestationNewBundle(ociremoteOpts, b, digest)
+	}
 
 	var payload []byte
 	if payloadRef == "" {
-		payload, err = cosign.ObsoletePayload(ctx, digest)
+		payload, err = cosign.ObsoletePayload(ctx, digest, nil)
 	} else {
 		payload, err = os.ReadFile(filepath.Clean(payloadRef))
 	}
 	if err != nil {
 		return err
+	}
+
+	b64SigBytes, err := signatureBytes(sigRef)
+	if err != nil {
+		return err
+	} else if len(b64SigBytes) == 0 {
+		return errors.New("empty signature")
 	}
 
 	sig, err := static.NewSignature(payload, string(b64SigBytes))
@@ -144,16 +148,25 @@ const (
 
 func signatureBytes(sigRef string) ([]byte, error) {
 	// sigRef can be "-", a string or a file.
+	var sig []byte
+	var err error
 	switch signatureType(sigRef) {
 	case StdinSignature:
-		return io.ReadAll(os.Stdin)
+		sig, err = io.ReadAll(os.Stdin)
 	case RawSignature:
 		return []byte(sigRef), nil
 	case FileSignature:
-		return os.ReadFile(filepath.Clean(sigRef))
+		sig, err = os.ReadFile(filepath.Clean(sigRef))
 	default:
 		return nil, errors.New("unknown signature arg type")
 	}
+	if err != nil {
+		return nil, err
+	}
+	// Files and stdin commonly carry a trailing newline (e.g. from `jq -r ... >
+	// file` or `echo`). Strip surrounding whitespace so it isn't stored verbatim
+	// as part of the signature annotation value.
+	return bytes.TrimSpace(sig), nil
 }
 
 func signatureType(sigRef string) SignatureArgType {

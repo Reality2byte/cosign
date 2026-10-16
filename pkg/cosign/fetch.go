@@ -27,10 +27,10 @@ import (
 	"sync"
 
 	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/in-toto/in-toto-golang/in_toto"
-	"github.com/sigstore/cosign/v2/pkg/cosign/bundle"
-	"github.com/sigstore/cosign/v2/pkg/oci"
-	ociremote "github.com/sigstore/cosign/v2/pkg/oci/remote"
+	"github.com/sigstore/cosign/v3/pkg/cosign/attestation"
+	"github.com/sigstore/cosign/v3/pkg/cosign/bundle"
+	"github.com/sigstore/cosign/v3/pkg/oci"
+	ociremote "github.com/sigstore/cosign/v3/pkg/oci/remote"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -154,15 +154,15 @@ func FetchAttestations(se oci.SignedEntity, predicateType string) ([]Attestation
 	if err != nil {
 		return nil, fmt.Errorf("fetching attestations: %w", err)
 	}
+	attestations := make([]AttestationPayload, 0, len(l))
 	if len(l) == 0 {
-		return nil, errors.New("found no attestations")
+		return attestations, nil
 	}
 	if len(l) > maxAllowedSigsOrAtts {
 		errMsg := fmt.Sprintf("maximum number of attestations on an image is %d, found %d", maxAllowedSigsOrAtts, len(l))
 		return nil, errors.New(errMsg)
 	}
 
-	attestations := make([]AttestationPayload, 0, len(l))
 	var attMu sync.Mutex
 
 	var g errgroup.Group
@@ -186,8 +186,9 @@ func FetchAttestations(se oci.SignedEntity, predicateType string) ([]Attestation
 				if err != nil {
 					return fmt.Errorf("decoding payload: %w", err)
 				}
-				var statement in_toto.Statement
-				if err := json.Unmarshal(decodedPayload, &statement); err != nil {
+				statement := &attestation.Statement{}
+
+				if err := statement.UnmarshalJSON(decodedPayload); err != nil {
 					return fmt.Errorf("unmarshaling statement: %w", err)
 				}
 				if statement.PredicateType != predicateType {
@@ -203,10 +204,6 @@ func FetchAttestations(se oci.SignedEntity, predicateType string) ([]Attestation
 	}
 	if err := g.Wait(); err != nil {
 		return nil, err
-	}
-
-	if len(attestations) == 0 && predicateType != "" {
-		return nil, fmt.Errorf("no attestations with predicate type '%s' found", predicateType)
 	}
 
 	return attestations, nil

@@ -54,7 +54,7 @@ type TimestampAuthorityClientImpl struct {
 
 const defaultTimeout = 10 * time.Second
 
-func getHTTPTransport(cacertFilename, certFilename, keyFilename, serverName string, timeout time.Duration) (http.RoundTripper, error) {
+func GetHTTPTransport(cacertFilename, certFilename, keyFilename, serverName string, timeout time.Duration) (http.RoundTripper, error) {
 	if timeout == 0 {
 		timeout = defaultTimeout
 	}
@@ -75,7 +75,6 @@ func getHTTPTransport(cacertFilename, certFilename, keyFilename, serverName stri
 		DialContext: (&net.Dialer{
 			Timeout:   timeout,
 			KeepAlive: 30 * time.Second,
-			DualStack: true,
 		}).DialContext,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
@@ -123,7 +122,7 @@ func (t *TimestampAuthorityClientImpl) GetTimestampResponse(tsq []byte) ([]byte,
 
 	// if mTLS-related fields are set, create a custom Transport for the Client
 	if t.CACert != "" || t.Cert != "" {
-		tr, err := getHTTPTransport(t.CACert, t.Cert, t.Key, t.ServerName, t.Timeout)
+		tr, err := GetHTTPTransport(t.CACert, t.Cert, t.Key, t.ServerName, t.Timeout)
 		if err != nil {
 			return nil, err
 		}
@@ -163,15 +162,4 @@ func (t *TimestampAuthorityClientImpl) GetTimestampResponse(tsq []byte) ([]byte,
 
 func NewTSAClient(url string) *TimestampAuthorityClientImpl {
 	return &TimestampAuthorityClientImpl{URL: url, Timeout: defaultTimeout}
-}
-
-func NewTSAClientMTLS(url, cacert, cert, key, serverName string) *TimestampAuthorityClientImpl {
-	return &TimestampAuthorityClientImpl{
-		URL:        url,
-		CACert:     cacert,
-		Cert:       cert,
-		Key:        key,
-		ServerName: serverName,
-		Timeout:    defaultTimeout,
-	}
 }

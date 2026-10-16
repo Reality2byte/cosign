@@ -32,20 +32,19 @@ steps:
         echo "Checking out ${_GIT_TAG}"
         git checkout ${_GIT_TAG}
 
-  - name: 'ghcr.io/sigstore/cosign/cosign:v2.5.2-dev@sha256:14a20131240190350e18f002bdd61345d2803eff370913737392281e834ee22a'
+  - name: 'ghcr.io/sigstore/cosign/cosign:v3.1.3-dev@sha256:3b1a2e2742351ab440255626f079a337e6c263249644800a52f5eaa389a5b730'
     dir: "go/src/sigstore/cosign"
     env:
       - TUF_ROOT=/tmp
     args:
       - 'verify'
-      - 'ghcr.io/gythialy/golang-cross:v1.24.5-0@sha256:492c51e60ed27ff597511b0a24e6c5acb6e3e2e97bb68d7bd35f81a7e3dfa4d0'
+      - 'ghcr.io/gythialy/golang-cross:v1.27.1-1@sha256:b288b491c96203db38192b24e25f5769e8e2a6618ebaa44ec0e269e74a94447d'
       - '--certificate-oidc-issuer'
       - "https://token.actions.githubusercontent.com"
       - '--certificate-identity'
-      - "https://github.com/gythialy/golang-cross/.github/workflows/release-golang-cross.yml@refs/tags/v1.24.5-0"
-
+      - "https://github.com/gythialy/golang-cross/.github/workflows/builder.yml@refs/tags/v1.27.1-1"
   # maybe we can build our own image and use that to be more in a safe side
-  - name: ghcr.io/gythialy/golang-cross:v1.24.5-0@sha256:492c51e60ed27ff597511b0a24e6c5acb6e3e2e97bb68d7bd35f81a7e3dfa4d0
+  - name: ghcr.io/gythialy/golang-cross:v1.27.1-1@sha256:b288b491c96203db38192b24e25f5769e8e2a6618ebaa44ec0e269e74a94447d
     entrypoint: /bin/sh
     dir: "go/src/sigstore/cosign"
     env:
@@ -68,12 +67,13 @@ steps:
         gcloud auth configure-docker \
         && make release
 
-  - name: ghcr.io/gythialy/golang-cross:v1.24.5-0@sha256:492c51e60ed27ff597511b0a24e6c5acb6e3e2e97bb68d7bd35f81a7e3dfa4d0
+  - name: ghcr.io/gythialy/golang-cross:v1.27.1-1@sha256:b288b491c96203db38192b24e25f5769e8e2a6618ebaa44ec0e269e74a94447d
     entrypoint: 'bash'
     dir: "go/src/sigstore/cosign"
     env:
       - "GOPATH=/workspace/go"
       - "GOBIN=/workspace/bin"
+      - "DOCKER_CONFIG=/workspace/.docker"
       - PROJECT_ID=${PROJECT_ID}
       - KEY_LOCATION=${_KEY_LOCATION}
       - KEY_RING=${_KEY_RING}
@@ -90,8 +90,46 @@ steps:
     args:
       - '-c'
       - |
-        echo $$GITHUB_TOKEN | docker login ghcr.io -u $$GITHUB_USER --password-stdin \
-        && make sign-release-images && make copy-signed-release-to-ghcr || true
+        gcloud auth configure-docker --quiet \
+        && echo $$GITHUB_TOKEN | docker login ghcr.io -u $$GITHUB_USER --password-stdin \
+        && make sign-release-images
+
+  - name: 'ghcr.io/oras-project/oras:v1.3.2@sha256:46c55ba0eac848ade573594ef23fa5b1784227f151dab6eac38de2afd0b9c382'
+    env:
+      - 'DOCKER_CONFIG=/workspace/.docker'
+    args:
+      - 'copy'
+      - '-r'
+      - 'gcr.io/${PROJECT_ID}/cosign:${_GIT_TAG}'
+      - '${_GHCR_PREFIX}/cosign:${_GIT_TAG}'
+
+  - name: 'ghcr.io/oras-project/oras:v1.3.2@sha256:46c55ba0eac848ade573594ef23fa5b1784227f151dab6eac38de2afd0b9c382'
+    env:
+      - 'DOCKER_CONFIG=/workspace/.docker'
+    args:
+      - 'copy'
+      - '-r'
+      - '${_GHCR_PREFIX}/cosign:${_GIT_TAG}'
+      - '${_GHCR_PREFIX}/cosign:latest'
+
+  - name: 'ghcr.io/oras-project/oras:v1.3.2@sha256:46c55ba0eac848ade573594ef23fa5b1784227f151dab6eac38de2afd0b9c382'
+    env:
+      - 'DOCKER_CONFIG=/workspace/.docker'
+    args:
+      - 'copy'
+      - '-r'
+      - 'gcr.io/${PROJECT_ID}/cosign:${_GIT_TAG}-dev'
+      - '${_GHCR_PREFIX}/cosign:${_GIT_TAG}-dev'
+
+  - name: 'ghcr.io/oras-project/oras:v1.3.2@sha256:46c55ba0eac848ade573594ef23fa5b1784227f151dab6eac38de2afd0b9c382'
+    env:
+      - 'DOCKER_CONFIG=/workspace/.docker'
+    args:
+      - 'copy'
+      - '-r'
+      - '${_GHCR_PREFIX}/cosign:${_GIT_TAG}-dev'
+      - '${_GHCR_PREFIX}/cosign:latest-dev'
+
 
 availableSecrets:
   secretManager:
@@ -124,3 +162,4 @@ substitutions:
   _KEY_VERSION: '1'
   _KEY_LOCATION: 'global'
   _GITHUB_USER: 'placeholder'
+  _GHCR_PREFIX: 'ghcr.io/sigstore/cosign'

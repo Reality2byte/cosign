@@ -19,13 +19,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/sigstore/cosign/v2/pkg/cosign/env"
-	"github.com/sigstore/cosign/v2/pkg/providers"
+	"github.com/sigstore/cosign/v3/pkg/cosign/env"
+	"github.com/sigstore/cosign/v3/pkg/providers"
 )
 
 const (
@@ -33,10 +34,15 @@ const (
 	RequestTokenEnvKey = env.VariableGitHubRequestToken
 	// Deprecated: use `env.VariableGitHubRequestURL` instead
 	RequestURLEnvKey = env.VariableGitHubRequestURL
+
+	// providerName is the name this provider is registered under.
+	providerName = "github-actions"
+	// maxErrorBodyBytes limits how much of a failed response body is quoted back in the error.
+	maxErrorBodyBytes = 256
 )
 
 func init() {
-	providers.Register("github-actions", &githubActions{})
+	providers.Register(providerName, &githubActions{})
 }
 
 type githubActions struct{}
@@ -68,7 +74,7 @@ func (ga *githubActions) Provide(ctx context.Context, audience string) (string, 
 
 	// Retry up to 3 times.
 	for i := 0; ; i++ {
-		req.Header.Add("Authorization", "bearer "+env.Getenv(env.VariableGitHubRequestToken))
+		req.Header.Set("Authorization", "bearer "+env.Getenv(env.VariableGitHubRequestToken))
 		resp, err := client.Do(req)
 		if err != nil {
 			if i == 2 {
@@ -93,12 +99,18 @@ func (ga *githubActions) Provide(ctx context.Context, audience string) (string, 
 		}
 		defer resp.Body.Close()
 
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+			return "", fmt.Errorf("identity token request to provider %s failed with status %s: %q",
+				providerName, resp.Status, strings.TrimSpace(string(body)))
+		}
+
 		var payload struct {
 			Value string `json:"value"`
 		}
 		decoder := json.NewDecoder(resp.Body)
 		if err := decoder.Decode(&payload); err != nil {
-			return "", err
+			return "", fmt.Errorf("invalid identity token response from provider %s: %w", providerName, err)
 		}
 		return payload.Value, nil
 	}

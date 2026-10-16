@@ -21,8 +21,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
-	"github.com/sigstore/cosign/v2/pkg/cosign/env"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/options"
+	"github.com/sigstore/cosign/v3/pkg/cosign/env"
 	"github.com/spf13/cobra"
 )
 
@@ -32,7 +32,14 @@ func Env() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "env",
 		Short: "Prints Cosign environment variables",
-		Args:  cobra.NoArgs,
+		Example: `  cosign env
+
+  # show environment variables with descriptions
+  cosign env --show-descriptions
+
+  # show environment variables including sensitive values
+  cosign env --show-descriptions --show-sensitive-values`,
+		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			envVars := env.EnvironmentVariables()
 			printEnv(envVars, getEnv(), getEnviron(), o.ShowDescriptions, o.ShowSensitiveValues)
@@ -132,7 +139,7 @@ func printEnv(envVars map[env.Variable]env.VariableOpts,
 }
 
 func sortEnvKeys(envVars map[env.Variable]env.VariableOpts) []env.Variable {
-	keys := []env.Variable{}
+	keys := make([]env.Variable, 0, len(envVars))
 	for k := range envVars {
 		keys = append(keys, k)
 	}

@@ -26,31 +26,25 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"net/http/httptest"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/go-openapi/strfmt"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/types"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/attach"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/download"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/generate"
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
-	cliverify "github.com/sigstore/cosign/v2/cmd/cosign/cli/verify"
-	"github.com/sigstore/cosign/v2/internal/pkg/cosign/tsa"
-	"github.com/sigstore/cosign/v2/internal/pkg/cosign/tsa/client"
-	"github.com/sigstore/cosign/v2/pkg/cosign"
-	"github.com/sigstore/cosign/v2/pkg/cosign/bundle"
-	ociremote "github.com/sigstore/cosign/v2/pkg/oci/remote"
-	tsaclient "github.com/sigstore/timestamp-authority/pkg/client"
-	"github.com/sigstore/timestamp-authority/pkg/server"
-	"github.com/spf13/viper"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/attach"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/download"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/generate"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/options"
+	cliverify "github.com/sigstore/cosign/v3/cmd/cosign/cli/verify"
+	cert_test "github.com/sigstore/cosign/v3/internal/test"
+	"github.com/sigstore/cosign/v3/pkg/cosign"
+	"github.com/sigstore/cosign/v3/pkg/cosign/bundle"
+	ociremote "github.com/sigstore/cosign/v3/pkg/oci/remote"
 )
 
 func TestAttachSignature(t *testing.T) {
@@ -73,11 +67,11 @@ func TestAttachSignature(t *testing.T) {
 
 	// Scenario 1: attach a single signature with certificate and certificate chain to an artifact
 	// and verify it using the root certificate.
-	rootCert1, rootKey1, _ := GenerateRootCa()
+	rootCert1, rootKey1, _ := cert_test.GenerateRootCa()
 	pemRoot1 := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootCert1.Raw})
 	pemRootRef1 := mkfile(string(pemRoot1), td, t)
-	subCert1, subKey1, _ := GenerateSubordinateCa(rootCert1, rootKey1)
-	leafCert1, privKey1, _ := GenerateLeafCert("foo@example.com", "oidc-issuer", subCert1, subKey1)
+	subCert1, subKey1, _ := cert_test.GenerateSubordinateCa(rootCert1, rootKey1)
+	leafCert1, privKey1, _ := cert_test.GenerateLeafCert("foo@example.com", "oidc-issuer", subCert1, subKey1)
 	pemSub1 := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: subCert1.Raw})
 	pemLeaf1 := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafCert1.Raw})
 	pemLeafRef1 := mkfile(string(pemLeaf1), td, t)
@@ -122,11 +116,11 @@ func TestAttachSignature(t *testing.T) {
 
 	// Scenario 2: Attaches second signature with another certificate and  certificate chain to the
 	// same artifact and verify it using both root certificates separately.
-	rootCert2, rootKey2, _ := GenerateRootCa()
+	rootCert2, rootKey2, _ := cert_test.GenerateRootCa()
 	pemRoot2 := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootCert2.Raw})
 	pemRootRef2 := mkfile(string(pemRoot2), td, t)
-	subCert2, subKey2, _ := GenerateSubordinateCa(rootCert2, rootKey2)
-	leafCert2, privKey2, _ := GenerateLeafCert("foo@exampleclient.com", "oidc-issuer", subCert2, subKey2)
+	subCert2, subKey2, _ := cert_test.GenerateSubordinateCa(rootCert2, rootKey2)
+	leafCert2, privKey2, _ := cert_test.GenerateLeafCert("foo@exampleclient.com", "oidc-issuer", subCert2, subKey2)
 	pemSub2 := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: subCert2.Raw})
 	pemLeaf2 := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafCert2.Raw})
 	pemLeafRef2 := mkfile(string(pemLeaf2), td, t)
@@ -166,82 +160,6 @@ func TestAttachSignature(t *testing.T) {
 	must(verifyCmd.Exec(ctx, args), t)
 }
 
-func TestAttachWithRFC3161Timestamp(t *testing.T) {
-	ctx := context.Background()
-	// TSA server needed to create timestamp
-	viper.Set("timestamp-signer", "memory")
-	viper.Set("timestamp-signer-hash", "sha256")
-	apiServer := server.NewRestAPIServer("localhost", 0, []string{"http"}, false, 10*time.Second, 10*time.Second)
-	server := httptest.NewServer(apiServer.GetHandler())
-	t.Cleanup(server.Close)
-
-	repo, stop := reg(t)
-	defer stop()
-	td := t.TempDir()
-
-	imgName := path.Join(repo, "cosign-attach-timestamp-e2e")
-
-	_, _, cleanup := mkimage(t, imgName)
-	defer cleanup()
-
-	b := bytes.Buffer{}
-	must(generate.GenerateCmd(context.Background(), options.RegistryOptions{}, imgName, nil, &b), t)
-
-	rootCert, rootKey, _ := GenerateRootCa()
-	subCert, subKey, _ := GenerateSubordinateCa(rootCert, rootKey)
-	leafCert, privKey, _ := GenerateLeafCert("subject@mail.com", "oidc-issuer", subCert, subKey)
-	pemRoot := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootCert.Raw})
-	pemSub := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: subCert.Raw})
-	pemLeaf := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafCert.Raw})
-
-	payloadref := mkfile(b.String(), td, t)
-
-	h := sha256.Sum256(b.Bytes())
-	signature, _ := privKey.Sign(rand.Reader, h[:], crypto.SHA256)
-	b64signature := base64.StdEncoding.EncodeToString(signature)
-	sigRef := mkfile(b64signature, td, t)
-	pemleafRef := mkfile(string(pemLeaf), td, t)
-	pemrootRef := mkfile(string(pemRoot), td, t)
-
-	certchainRef := mkfile(string(append(pemSub, pemRoot...)), td, t)
-
-	t.Setenv("SIGSTORE_ROOT_FILE", pemrootRef)
-
-	tsclient, err := tsaclient.GetTimestampClient(server.URL)
-	if err != nil {
-		t.Error(err)
-	}
-
-	chain, err := tsclient.Timestamp.GetTimestampCertChain(nil)
-	if err != nil {
-		t.Fatalf("unexpected error getting timestamp chain: %v", err)
-	}
-
-	file, err := os.CreateTemp(os.TempDir(), "tempfile")
-	if err != nil {
-		t.Fatalf("error creating temp file: %v", err)
-	}
-	defer os.Remove(file.Name())
-	_, err = file.WriteString(chain.Payload)
-	if err != nil {
-		t.Fatalf("error writing chain payload to temp file: %v", err)
-	}
-
-	tsBytes, err := tsa.GetTimestampedSignature(signature, client.NewTSAClient(server.URL+"/api/v1/timestamp"))
-	if err != nil {
-		t.Fatalf("unexpected error creating timestamp: %v", err)
-	}
-	rfc3161TSRef := mkfile(string(tsBytes), td, t)
-
-	// Upload it!
-	err = attach.SignatureCmd(ctx, options.RegistryOptions{}, sigRef, payloadref, pemleafRef, certchainRef, rfc3161TSRef, "", imgName)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	must(verifyKeylessTSA(imgName, file.Name(), true, true), t)
-}
-
 func TestAttachWithRekorBundle(t *testing.T) {
 	ctx := context.Background()
 
@@ -257,9 +175,9 @@ func TestAttachWithRekorBundle(t *testing.T) {
 	b := bytes.Buffer{}
 	must(generate.GenerateCmd(context.Background(), options.RegistryOptions{}, imgName, nil, &b), t)
 
-	rootCert, rootKey, _ := GenerateRootCa()
-	subCert, subKey, _ := GenerateSubordinateCa(rootCert, rootKey)
-	leafCert, privKey, _ := GenerateLeafCert("subject@mail.com", "oidc-issuer", subCert, subKey)
+	rootCert, rootKey, _ := cert_test.GenerateRootCa()
+	subCert, subKey, _ := cert_test.GenerateSubordinateCa(rootCert, rootKey)
+	leafCert, privKey, _ := cert_test.GenerateLeafCert("subject@mail.com", "oidc-issuer", subCert, subKey)
 	pemRoot := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootCert.Raw})
 	pemSub := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: subCert.Raw})
 	pemLeaf := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafCert.Raw})

@@ -99,6 +99,34 @@ func TestLoadURL(t *testing.T) {
 	}
 }
 
+func TestLoadURLNon2xxStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+	}{
+		{"NotFound", http.StatusNotFound},
+		{"InternalServerError", http.StatusInternalServerError},
+		{"Forbidden", http.StatusForbidden},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+				rw.WriteHeader(tc.statusCode)
+				rw.Write([]byte("error page"))
+			}))
+			defer server.Close()
+
+			_, err := LoadFileOrURL(server.URL)
+			if err == nil {
+				t.Fatalf("LoadFileOrURL() with HTTP %d: expected error, got nil", tc.statusCode)
+			}
+			if !strings.Contains(err.Error(), "HTTP") {
+				t.Errorf("error should mention HTTP status, got: %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadURLWithChecksum(t *testing.T) {
 	data := []byte("test")
 
@@ -125,6 +153,29 @@ func TestLoadURLWithChecksum(t *testing.T) {
 	)
 	if err != nil {
 		t.Errorf("Reading from HTTP failed: %v", err)
+	} else if !bytes.Equal(actual, data) {
+		t.Errorf("LoadFileOrURL(HTTP) = '%s'; want '%s'", actual, data)
+	}
+
+	// an upper-case digest is the same digest: hex is case-insensitive, and
+	// checksums are frequently published in upper case
+	actual, err = LoadFileOrURLWithChecksum(
+		server.URL,
+		"9F86D081884C7D659A2FEAA0C55AD015A3BF4F1B2B0B822CD15D6C15B0F00A08",
+	)
+	if err != nil {
+		t.Errorf("Upper-case checksum rejected: %v", err)
+	} else if !bytes.Equal(actual, data) {
+		t.Errorf("LoadFileOrURL(HTTP) = '%s'; want '%s'", actual, data)
+	}
+
+	// same for the prefixed form
+	actual, err = LoadFileOrURLWithChecksum(
+		server.URL,
+		"sha512:EE26B0DD4AF7E749AA1A8EE3C10AE9923F618980772E473F8819A5D4940E0DB27AC185F8A0E1D5F84F88BC887FD67B143732C304CC5FA9AD8E6F57F50028A8FF",
+	)
+	if err != nil {
+		t.Errorf("Upper-case sha512 checksum rejected: %v", err)
 	} else if !bytes.Equal(actual, data) {
 		t.Errorf("LoadFileOrURL(HTTP) = '%s'; want '%s'", actual, data)
 	}

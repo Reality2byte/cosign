@@ -1,4 +1,4 @@
-// Copyright 2023 the Sigstore Authors.
+// Copyright 2023 The Sigstore Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,8 +19,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
-	ociremote "github.com/sigstore/cosign/v2/pkg/oci/remote"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/options"
+	ociremote "github.com/sigstore/cosign/v3/pkg/oci/remote"
 )
 
 func TestCopyAttachmentTagPrefix(t *testing.T) {
